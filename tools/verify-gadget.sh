@@ -31,7 +31,9 @@ if [ -n "$UDC" ]; then
     for a in state current_speed maximum_speed is_a_peripheral function; do
         printf '  %-18s %s\n' "$a" "$(cat "/sys/class/udc/$UDC/$a" 2>/dev/null || echo n/a)"
     done
-    echo "  (state should be 'configured' and current_speed 'full-speed' while the target is on)"
+    printf '  %-18s %s\n' "lpm (debugfs)" "$(grep -E '^\s*lpm\s*[:=]' /sys/kernel/debug/usb/$UDC/params 2>/dev/null | awk '{print $NF}' || echo n/a)"
+    echo "  (state should be 'configured' and current_speed 'full-speed' while the target is on;"
+    echo "   lpm 1 means the host sees bcdUSB 2.01 plus a BOS descriptor, lpm 0 means bcdUSB 2.00)"
 else
     echo "== UDC: not bound"
 fi

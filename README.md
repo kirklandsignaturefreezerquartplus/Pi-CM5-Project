@@ -29,20 +29,21 @@ the KVM as a new game controller.
 
 | Field | Value | Set by |
 |---|---|---|
-| Speed | full-speed (12 Mbit/s), never chirps to high-speed | `gadget.max_speed` |
-| Device class | 0 / 0 / 0 (defined per interface) | fixed |
-| idVendor / idProduct | 0x1209 / 0x0001 by default, configurable | `gadget.vendor_id/product_id` |
-| Strings | "Generic" / "USB Keyboard", no serial | `gadget.manufacturer/product/serial` |
-| Configuration | 1 config, bus-powered, remote wakeup, 100 mA | `gadget.*` |
-| Interface 0 | HID 1.11, subclass 1 (boot), protocol 1 (keyboard), 1 IN endpoint | fixed |
+| Speed | full-speed (12 Mbit/s) by default, or high-speed | `gadget.max_speed` |
+| Device descriptor | USB 2.00, class 0/0/0, EP0 64 bytes | kernel |
+| idVendor / idProduct / bcdDevice | 0x1209 / 0x0001 / 1.00 by default, configurable | `gadget.*` |
+| Strings | "Generic" / "USB Keyboard" / random serial written at install | `gadget.manufacturer/product/serial` |
+| Configuration | 1 config, bus-powered, remote wakeup bit, 100 mA, no OTG descriptor | `gadget.*` |
+| Interface 0 | HID class 3, subclass 1 (boot), protocol 1 (keyboard), one interrupt IN endpoint | fixed |
 | Report descriptor 0 | 63-byte HID spec Appendix E.6 boot keyboard, byte for byte | `keyboard.descriptor` |
-| Interface 1 | HID 1.11, subclass 1 (boot), protocol 2 (mouse), 1 IN endpoint | `mouse.mode` |
+| Interface 1 | HID class 3, subclass 1 (boot), protocol 2 (mouse), one interrupt IN endpoint | `mouse.mode` |
 | Report descriptor 1 | boot mouse (buttons, X, Y) + wheel byte | `mouse.buttons` |
+| GET_REPORT / SET_PROTOCOL / SET_IDLE / LED SET_REPORT | answered like a real boot keyboard | bridge + kernel |
 | MS OS descriptors / WebUSB / report IDs | none | fixed |
 
-`docs/usb-identity.md` lists the handful of fields the Linux gadget stack fixes
-itself (bcdUSB, EP0 size) and how to verify the enumeration from Windows or a
-Linux host.
+`docs/usb-identity.md` is the field-by-field accounting, checked against the
+Raspberry Pi 6.12 kernel sources, of what is pinned, what the kernel decides,
+and how to verify the enumeration from Windows or a Linux host.
 
 ## Quick start (on the CM5)
 
@@ -109,9 +110,13 @@ in `[[inputs]]` rules; their keystrokes never reach the PC directly.
 * Sources are grabbed (`EVIOCGRAB`) so the CM5's own console never acts on
   forwarded keystrokes (Ctrl+Alt+Del included).  Unplugging a source releases
   every key it held.
-* If the PC is off or suspended, reports are dropped rather than queued, and
-  the first key press after power-up asserts remote wakeup where the kernel
-  supports `wakeup_on_write`.
+* If the PC is off or suspended, reports are dropped rather than queued. The
+  CM5's controller driver cannot initiate USB remote wakeup, so a key press
+  does not wake a sleeping PC (the descriptor bit is still advertised, as on
+  real keyboards).
+* `GET_REPORT(Input)` on the control endpoint is answered instantly with the
+  current key/button state, as a real keyboard does, via the kernel's
+  GET_REPORT cache.
 
 ## Repository layout
 

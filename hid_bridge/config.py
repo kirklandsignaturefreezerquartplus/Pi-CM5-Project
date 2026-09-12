@@ -20,7 +20,6 @@ class GadgetConfig:
     vendor_id: int = 0x1209
     product_id: int = 0x0001
     device_version: int = 0x0100
-    usb_version: int = 0x0110
     manufacturer: str = "Generic"
     product: str = "USB Keyboard"
     serial: str = ""
@@ -148,7 +147,7 @@ def parse_config(data: dict[str, Any], path: str = "") -> Config:
         raise ConfigError(f"unknown top-level section(s): {', '.join(sorted(unknown))}")
 
     _apply(data.get("gadget", {}), cfg.gadget, "gadget",
-           {"vendor_id", "product_id", "device_version", "usb_version", "max_power_ma"})
+           {"vendor_id", "product_id", "device_version", "max_power_ma"})
     _apply(data.get("keyboard", {}), cfg.keyboard, "keyboard", {"poll_interval_ms"})
     mouse = dict(data.get("mouse", {}))
     if "abs_to_rel_resolution" in mouse:
@@ -205,7 +204,7 @@ def parse_config(data: dict[str, Any], path: str = "") -> Config:
 def validate(cfg: Config) -> None:
     g = cfg.gadget
     for label, value in (("vendor_id", g.vendor_id), ("product_id", g.product_id),
-                         ("device_version", g.device_version), ("usb_version", g.usb_version)):
+                         ("device_version", g.device_version)):
         if not 0 <= value <= 0xFFFF:
             raise ConfigError(f"gadget.{label} must be within 0x0000-0xFFFF")
     if g.max_speed not in ("low-speed", "full-speed", "high-speed"):

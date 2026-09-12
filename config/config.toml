@@ -14,23 +14,30 @@ name = "hidbridge"
 vendor_id = 0x1209
 product_id = 0x0001
 device_version = 0x0100   # bcdDevice
-usb_version = 0x0110      # bcdUSB requested (see docs/usb-identity.md; kernel may report 2.00/2.10)
 
-# String descriptors.  Leave `serial` empty for iSerialNumber = 0, which is
-# what most inexpensive keyboards report.  `product` only appears when
-# `manufacturer` is also set (libcomposite allocates string IDs in order).
+# String descriptors.  Set all three or none: once any string exists the kernel
+# always allocates iManufacturer=1, iProduct=2, iSerialNumber=3 and answers an
+# unset one with an empty string, which no real keyboard does.  install.sh
+# fills `serial` with a random 12-digit hex value on first install.  Clearing
+# all three gives a device with no strings at all (also common for cheap
+# keyboards).
 manufacturer = "Generic"
 product = "USB Keyboard"
 serial = ""
 
-# Enumerate as a USB 1.1 style full-speed device (12 Mbit/s), never
-# high-speed.  Options: full-speed | high-speed | low-speed (dwc2 cannot do
-# low-speed device mode; the kernel will refuse or ignore it).
+# Bus speed.  "full-speed" (12 Mbit/s) is what real keyboards and mice use and
+# gives 10 ms polling (fixed by the kernel's HID function).  "high-speed" is a
+# self-consistent USB 2.0 device with 1 ms polling, like a gaming keyboard.
+# At full speed the controller still answers a DEVICE_QUALIFIER request (it is
+# high-speed capable hardware); every OS and firmware tolerates that.
+# "low-speed" is not usable with the CM5's controller.
 max_speed = "full-speed"
 
 # Configuration descriptor power attributes.
 self_powered = false      # bmAttributes bit 6; false = looks bus powered like a real keyboard
-remote_wakeup = true      # bmAttributes bit 5 + wake the PC on key press when the kernel supports it
+remote_wakeup = true      # bmAttributes bit 5, as real keyboards advertise. NOTE: the CM5's dwc2
+                          # driver cannot initiate remote wakeup, so a key press will not wake a
+                          # sleeping PC even though the bit is set.
 max_power_ma = 100        # MaxPower
 
 # Force a specific UDC name (see /sys/class/udc); empty = the first one found.
@@ -41,7 +48,8 @@ udc = ""
 # "extended" = same report format, key array widened to 0x00-0xFF so F13-F24 and
 #              international keys are deliverable.  Both are boot-protocol compatible.
 descriptor = "boot"
-poll_interval_ms = 10     # bInterval (only applied when the kernel exposes f_hid 'interval')
+poll_interval_ms = 10     # bInterval; Raspberry Pi kernels up to 6.12 have no f_hid 'interval'
+                          # attribute and fix it at 10 ms (full speed) / 1 ms (high speed)
 
 [mouse]
 # "relative" = classic boot-protocol mouse + wheel (4-byte reports). Works in UEFI/BIOS.
@@ -50,7 +58,7 @@ poll_interval_ms = 10     # bInterval (only applied when the kernel exposes f_hi
 #              "relative" here, or leave PiKVM absolute and let the bridge convert.
 mode = "relative"
 buttons = 3               # 3 or 5 (5 adds back/forward)
-poll_interval_ms = 2
+poll_interval_ms = 2      # same caveat as keyboard.poll_interval_ms
 # Absolute source -> relative output: the source range is mapped onto this
 # virtual screen size to produce pixel deltas.
 abs_to_rel_resolution = [1920, 1080]

@@ -50,9 +50,9 @@ above.  Reports are dropped, not queued, until it does.
 ## "host not polling, report dropped"
 
 The host enumerated the device but is not fetching interrupt reports:
-typically the PC is suspended.  With `remote_wakeup = true` and a kernel that
-has `wakeup_on_write`, the first key press wakes it.  Otherwise wake the PC
-by other means.
+typically the PC is suspended.  The CM5's dwc2 driver cannot initiate USB
+remote wakeup, so a key press will not wake the PC; wake it by other means.
+The first report after resume carries the current key state.
 
 ## A key seems stuck on the PC
 

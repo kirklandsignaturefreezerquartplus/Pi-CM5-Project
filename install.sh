@@ -34,7 +34,10 @@ if [ -f "$CONFIG_DIR/config.toml" ]; then
     echo "    kept existing $CONFIG_DIR/config.toml (new defaults in config.toml.dist)"
 else
     install -m 0644 "$SRC_DIR/config/config.toml" "$CONFIG_DIR/config.toml"
-    echo "    wrote $CONFIG_DIR/config.toml"
+    # Give this unit a stable, unique serial like a real keyboard would have.
+    SERIAL=$(tr -dc 'A-F0-9' </dev/urandom | head -c 12)
+    sed -i "s/^serial = \"\"/serial = \"$SERIAL\"/" "$CONFIG_DIR/config.toml"
+    echo "    wrote $CONFIG_DIR/config.toml (serial $SERIAL)"
 fi
 
 echo "==> kernel modules"

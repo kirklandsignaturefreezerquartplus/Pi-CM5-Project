@@ -1,61 +1,82 @@
 # USB identity: what is pinned, what the kernel fixes, how to verify
 
-The requirement is that the PC sees **only a simple generic keyboard and
-mouse, down to the USB handshake**.  This document is the honest accounting of
-that requirement against what Linux's `libcomposite`/`usb_f_hid`/`dwc2`
-stack lets user space control.
+Goal: the PC sees **only a plain USB keyboard and mouse**, down to the control
+transfers of enumeration.  This is the honest accounting of that goal against
+the Linux gadget stack the CM5 runs (`libcomposite`, `usb_f_hid`, `dwc2`),
+checked against the Raspberry Pi `rpi-6.12.y` kernel sources.
 
-## Pinned by hid-bridge (configfs)
+## Pinned by hid-bridge
 
 | Descriptor / behaviour | Value | Notes |
 |---|---|---|
-| Link speed | full-speed only (`max_speed = "full-speed"`) | dwc2 is told not to chirp; the host never sees a high-speed capable device and a `GET_DESCRIPTOR(DEVICE_QUALIFIER)` is STALLed, exactly like a USB 1.1 device. |
-| bDeviceClass/SubClass/Protocol | 0/0/0 | class defined at interface level |
-| idVendor / idProduct / bcdDevice | configurable | Windows and UEFI bind boot HID by class; the IDs only affect Device Manager's hardware ID strings. |
-| iManufacturer / iProduct | "Generic" / "USB Keyboard" (configurable) | |
-| iSerialNumber | 0 (none) unless `gadget.serial` is set | most inexpensive keyboards have none |
+| Link speed | full-speed (default) or high-speed | `gadget.max_speed`; see "Speed choice" |
+| bDeviceClass / SubClass / Protocol | 0 / 0 / 0 | class defined at interface level, as every keyboard does |
+| idVendor / idProduct / bcdDevice | configurable | Windows and UEFI bind boot HID by class; the IDs only appear in Device Manager hardware IDs |
+| Strings | manufacturer, product, serial | all three set (install writes a random serial) or none; see "Strings" |
 | iConfiguration / iInterface | 0 | never set |
 | bNumConfigurations | 1 | |
 | Configuration bmAttributes / MaxPower | 0xA0 (bus powered + remote wakeup), 100 mA | configurable |
-| Interfaces | 2: HID boot keyboard, HID boot mouse | link order fixes interface numbers 0 and 1 |
-| Endpoints | one interrupt IN per interface | `no_out_endpoint = 1` (kernel ≥ 5.16): LED output travels over EP0 `SET_REPORT`, as with real boot keyboards |
-| HID class descriptor | bcdHID 1.11, bCountryCode 0, one report descriptor | as emitted by `usb_f_hid` |
-| Report descriptor (keyboard) | 63 bytes, HID 1.11 App. E.6 | `keyboard.descriptor = "boot"`; unit test asserts byte equality |
-| Report descriptor (mouse) | boot mouse + wheel | first 3 report bytes are the boot format |
-| Report IDs | none | |
-| bInterval | keyboard 10 ms, mouse 2 ms | applied when the kernel exposes the f_hid `interval` attribute (6.x); otherwise f_hid's default of 10 ms applies to both |
-| Remote wakeup | asserted on first write after suspend | `wakeup_on_write` attribute where available |
-| GET/SET_PROTOCOL, GET/SET_IDLE | handled by `usb_f_hid` | a BIOS switching to boot protocol keeps working because our reports already are boot format |
-| Microsoft OS string descriptor (index 0xEE) | STALL | `os_desc` is never configured |
 | OTG descriptor | absent | requires `dr_mode=peripheral`, which `install.sh` sets |
-| BOS / WebUSB / LPM capability | not requested | see kernel-fixed fields below |
+| Interfaces | 2: HID boot keyboard, HID boot mouse | link order fixes interface numbers 0 and 1 |
+| Endpoints | one interrupt IN per interface | `no_out_endpoint = 1`: LED output travels over EP0 `SET_REPORT`, exactly as with real boot keyboards |
+| wMaxPacketSize | 8 (keyboard), 4 (mouse) | `usb_f_hid` uses the report length |
+| Report descriptor (keyboard) | 63 bytes, HID 1.11 Appendix E.6, byte for byte | `keyboard.descriptor = "boot"`; a unit test asserts equality |
+| Report descriptor (mouse) | boot mouse + wheel | the first 3 report bytes are the boot format |
+| Report IDs | none | |
+| `GET_REPORT(Input)` | current key / button state, immediately | the bridge keeps `usb_f_hid`'s GET_REPORT cache current (`GADGET_HID_WRITE_GET_REPORT`, kernel ≥ 6.10); without it the kernel would stall the request for 2.5 s and answer zeros |
+| `SET_PROTOCOL` / `GET_PROTOCOL` | accepted on both boot interfaces | `usb_f_hid` stores it; our reports already are boot format so nothing changes |
+| `SET_IDLE` / `GET_IDLE` | accepted | idle-rate re-sends are not implemented by `usb_f_hid`; Windows and UEFI set idle 0 anyway |
+| LED `SET_REPORT` | 1 byte over EP0 | forwarded to the PiKVM keyboard as EV_LED |
+| Microsoft OS string descriptor (0xEE) | STALL | `os_desc` / WebUSB never configured |
 
-## Fixed by the kernel (cannot be changed from user space)
+## Fixed by the kernel (not changeable from user space)
 
-| Field | What a USB 1.1 keyboard reports | What the CM5 reports | Why |
+| Field | Typical real keyboard | What the CM5 reports | Where |
 |---|---|---|---|
-| bcdUSB | 0x0110 | 0x0200, or 0x0201/0x0210 with a BOS descriptor | `composite.c` overwrites the configfs `bcdUSB` value from the gadget's capabilities; if `dwc2` marks the gadget `lpm_capable`, libcomposite advertises USB 2.0 LPM through a BOS descriptor. |
-| bMaxPacketSize0 | 8 | 64 | `composite.c` copies the controller's EP0 size; dwc2 uses 64. |
-| Endpoint addresses | vendor-specific | 0x81, 0x82 | allocated by the controller; the same as most real two-interface combos |
-| Hub-level electrical signalling | FS | FS | identical: no chirp, 12 Mbit/s, D+ pull-up |
+| bcdUSB | 0x0110 or 0x0200 | 0x0200; 0x0201 plus a BOS descriptor with a USB 2.0 Extension (LPM) capability if the dwc2 core has LPM enabled | `composite.c` recomputes it from the gadget's capabilities; `dwc2` sets `lpm_capable` from the hardware's `lpm_mode` |
+| bMaxPacketSize0 | 8 or 64 | 64 | `composite.c` copies dwc2's EP0 size (`EP0_MPS_LIMIT`) |
+| bcdHID | 0x0110 | 0x0101 | constant in `usb_f_hid` |
+| bInterval | 8–10 ms (FS) | 10 ms at full speed, 1 ms at high speed | constants in `usb_f_hid`; the `poll_interval_ms` options only take effect on kernels that add an `interval` attribute |
+| DEVICE_QUALIFIER / OTHER_SPEED_CONFIGURATION at full speed | STALL (FS-only device) | answered (qualifier says high-speed capable) | `gadget->max_speed` stays HIGH because dwc2 does not read a DT `maximum-speed`; only `params.speed` is lowered |
+| Remote wakeup | bit advertised and functional | bit advertised, **not functional** | dwc2's gadget ops have no `.wakeup`; `usb_f_hid` has no `wakeup_on_write` in 6.12 |
+| Unset strings | absent (index 0) | index allocated, empty string descriptor | `libcomposite` substitutes "" for unset strings once the language directory exists |
 
-Both deviations are common in genuine full-speed keyboards sold today (many
-report bcdUSB 2.00 and an EP0 size of 64), and neither is inspected by
-Windows' HID class drivers or by UEFI boot-keyboard drivers.  They are only
-visible to a protocol analyser or a descriptor dumper.
+Windows' HID class drivers and UEFI boot-keyboard drivers inspect none of
+these; all of them are common in genuine USB 2.0 full-speed keyboards sold
+today except the qualifier answer, which every host tolerates (a high-speed
+capable device attached at full speed is a legal state).  They are visible
+only to a descriptor dumper or a protocol analyser.
 
-If a byte-exact `bcdUSB = 0x0110` / `bMaxPacketSize0 = 8` is required anyway,
-the options are:
+`hid-bridge check` and `tools/verify-gadget.sh` read dwc2's debugfs
+`params` to tell you whether LPM is on, i.e. whether the wire shows 2.00 or
+2.01 + BOS.
 
-1. **Kernel patch** — in `drivers/usb/gadget/composite.c` (`composite_setup`,
-   `USB_DT_DEVICE` case) honour the descriptor values written through configfs
-   instead of recomputing them, and in `drivers/usb/gadget/udc/dwc2` clear
-   `gadget.lpm_capable`.  Raspberry Pi OS kernels rebuild in an hour on the
-   CM5 itself.
-2. **raw-gadget** (`CONFIG_USB_RAW_GADGET`) — user space answers every control
-   request itself, so every descriptor byte is yours.  It is a rewrite of the
-   gadget half of this project and forgoes `usb_f_hid`'s boot-protocol
-   handling, so it is documented as a future path rather than implemented.
+If a byte-exact match is required anyway, the routes are a kernel patch
+(honour the configfs `bcdUSB`/`bMaxPacketSize0` in `composite_setup`, set
+`gadget.max_speed` from `params.speed` in `dwc2_gadget_init`, clear
+`lpm_capable`) or `raw-gadget`, where user space answers every control
+request itself.  Both are outside this project.
+
+## Speed choice
+
+* **full-speed** (default): 12 Mbit/s like real keyboards and mice, 10 ms
+  polling, boot-protocol behaviour identical to a real FS device.  Deviation:
+  the qualifier answer above.
+* **high-speed**: a fully self-consistent USB 2.0 high-speed device with 1 ms
+  polling (what gaming keyboards do).  Deviation: generic keyboards are not
+  high-speed.  UEFI handles high-speed HID on any EHCI/xHCI controller.
+
+Switch with `gadget.max_speed`, then `systemctl restart hid-gadget hid-bridge`
+and re-plug the PC side.
+
+## Strings
+
+`libcomposite` allocates iManufacturer=1, iProduct=2, iSerialNumber=3 as soon
+as the `strings/0x409` directory exists and answers unset entries with an
+empty string descriptor.  Real keyboards either have all their strings or
+none, so `hid-bridge` warns when only some are set.  `install.sh` writes a
+random 12-digit hexadecimal serial into a fresh config so every unit is
+unique, as with a real product.  To ship no strings at all, clear all three.
 
 ## Verifying from the target PC
 
@@ -74,10 +95,11 @@ Windows names interfaces of any multi-interface device, keyboards with
 integrated pointing devices included.
 
 For the raw descriptors use **USBView** from the Windows SDK or **Thesycon USB
-Descriptor Dumper**.  Check: `bcdUSB`, `bDeviceClass 0`, one configuration,
-`bmAttributes 0xA0`, two interfaces of class 3 with subclass 1 and protocols 1
-and 2, one interrupt IN endpoint each, and the report descriptors matching the
-hex printed by `hid-bridge check` on the CM5.
+Descriptor Dumper**.  Check: `bcdUSB 2.00` (or `2.01` with a BOS descriptor),
+`bDeviceClass 0`, one configuration with `bmAttributes 0xA0`, two interfaces
+of class 3 with subclass 1 and protocols 1 and 2, one interrupt IN endpoint
+each, and report descriptors matching the hex printed by `hid-bridge check`
+on the CM5.
 
 ### Linux host
 
@@ -86,23 +108,26 @@ lsusb -d 1209:0001 -v            # descriptors
 sudo usbhid-dump -d 1209:0001    # raw report descriptors
 ```
 
-`lsusb -t` should show the device under an EHCI/xHCI root at **12M**.
+`lsusb -t` shows the device at **12M** (full-speed) or **480M** (high-speed).
 
 ### On the CM5
 
 ```sh
-tools/verify-gadget.sh          # configfs values, UDC state and speed, hidg nodes
+tools/verify-gadget.sh          # configfs values, UDC state, speed, LPM, hidg nodes
 hid-bridge gadget status        # same as JSON
+hid-bridge check                # config + descriptor hex + kernel feature report
 ```
 
-`state` must read `configured` and `current_speed` `full-speed` while the PC
-is on.
+`state` must read `configured` and `current_speed` `full-speed` (or
+`high-speed`) while the PC is on.
 
 ## UEFI / pre-boot behaviour
 
-UEFI keyboard drivers require: class 3, subclass 1 (boot), protocol 1, an
-interrupt IN endpoint, and 8-byte boot reports — all satisfied.  Firmware that
-issues `SET_PROTOCOL(boot)` gets identical reports.  Mouse support in setup
+UEFI keyboard drivers require class 3, subclass 1 (boot), protocol 1, an
+interrupt IN endpoint and 8-byte boot reports, all satisfied.  Firmware that
+issues `SET_PROTOCOL(boot)` gets identical reports, and a `GET_REPORT` during
+initialisation is answered immediately from the cache.  Mouse support in setup
 menus additionally needs protocol 2 with 3-byte boot reports, which the
 default `mouse.mode = "relative"` provides.  The `absolute` mode is a tablet
-style pointer, which firmware ignores; use it only when the OS is running.
+style pointer (subclass 0, protocol 0), which firmware ignores; use it only
+when the OS is running.

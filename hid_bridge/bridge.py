@@ -11,6 +11,7 @@ from . import linux_input as li
 from .config import Config, InputRule
 from .control import ControlServer
 from .descriptors import ABS_MAX_VALUE, KEYBOARD_REPORT_LENGTH, mouse_report_length
+from .gadget import udc_current_state, udc_state
 from .hidg import HidgDevice
 from .keymap import CODE_NAMES, EVDEV_TO_HID, KEY_CODES
 from .linux_input import InputDevice, list_event_nodes
@@ -120,23 +121,28 @@ class Bridge:
         buttons = self.all_buttons()
         n = self.cfg.mouse.buttons
         if self.cfg.mouse.mode == "relative":
+            # GET_REPORT on a relative mouse answers buttons with zero motion.
+            still = relative_mouse_reports(buttons, 0, 0, 0, n)[0]
             for report in relative_mouse_reports(buttons, dx, dy, wheel, n):
-                self.mouse.write_report(report, force=True)
+                self.mouse.write_report(report, force=True, get_report=still)
             return
         gain = self.cfg.mouse.rel_to_abs_gain
         if dx or dy:
             self.abs_pos[0] = clamp(self.abs_pos[0] + round(dx * gain), 0, ABS_MAX_VALUE)
             self.abs_pos[1] = clamp(self.abs_pos[1] + round(dy * gain), 0, ABS_MAX_VALUE)
         report = absolute_mouse_report(buttons, self.abs_pos[0], self.abs_pos[1], wheel, n)
-        self.mouse.write_report(report, force=bool(wheel))
+        still = absolute_mouse_report(buttons, self.abs_pos[0], self.abs_pos[1], 0, n)
+        self.mouse.write_report(report, force=bool(wheel), get_report=still)
 
     def _emit_mouse_absolute(self, x: int | None, y: int | None, wheel: int) -> None:
         if x is not None:
             self.abs_pos[0] = x
         if y is not None:
             self.abs_pos[1] = y
-        report = absolute_mouse_report(self.all_buttons(), self.abs_pos[0], self.abs_pos[1], wheel, self.cfg.mouse.buttons)
-        self.mouse.write_report(report, force=bool(wheel))
+        n = self.cfg.mouse.buttons
+        report = absolute_mouse_report(self.all_buttons(), self.abs_pos[0], self.abs_pos[1], wheel, n)
+        still = absolute_mouse_report(self.all_buttons(), self.abs_pos[0], self.abs_pos[1], 0, n)
+        self.mouse.write_report(report, force=bool(wheel), get_report=still)
 
     # ----------------------------------------------------------- MacroTarget
     def macro_keys_changed(self) -> None:
@@ -371,8 +377,14 @@ class Bridge:
             return {"released": True}
         raise ValueError(f"unknown command {cmd!r}")
 
+    def _poll_host_state(self) -> None:
+        if not self.udc:
+            return
+        state = udc_current_state(self.udc)
+        self.kbd.host_state_changed(state)
+        self.mouse.host_state_changed(state)
+
     def status(self) -> dict:
-        from .gadget import udc_state
         return {
             "uptime_s": round(time.monotonic() - self.started, 1),
             "udc": udc_state(self.udc) if self.udc else {},
@@ -417,6 +429,7 @@ class Bridge:
                 now = time.monotonic()
                 if now >= next_rescan:
                     self._rescan()
+                    self._poll_host_state()
                     next_rescan = now + rescan_every
                 self.macro.run_due(now)
                 timeout = next_rescan - now
@@ -424,7 +437,9 @@ class Bridge:
                 if deadline is not None:
                     timeout = min(timeout, deadline - now)
                 timeout = max(0.0, timeout)
-                rlist = list(self.sources) + [self.kbd.fd, self._wake_r]
+                rlist = list(self.sources) + [self._wake_r]
+                if self.kbd.poll_readable:
+                    rlist.append(self.kbd.fd)
                 if self.control is not None:
                     rlist.append(self.control.fileno())
                 try:

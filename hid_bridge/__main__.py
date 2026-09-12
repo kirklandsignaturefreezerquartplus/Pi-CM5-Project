@@ -110,6 +110,12 @@ def cmd_check(args, cfg) -> int:
           f"max_speed={g.max_speed} strings={'/'.join(filter(None, (g.manufacturer, g.product, g.serial))) or '(none)'}")
     attrs = 0x80 | (0x40 if g.self_powered else 0) | (0x20 if g.remote_wakeup else 0)
     print(f"config: bmAttributes=0x{attrs:02x} MaxPower={g.max_power_ma}mA, 2 interfaces (HID keyboard, HID mouse)")
+    strings_set = [bool(g.manufacturer), bool(g.product), bool(g.serial)]
+    if any(strings_set) and not all(strings_set):
+        print("  note: set all of manufacturer/product/serial or none; an unset one becomes an empty string descriptor"
+              " (install.sh fills in a random serial on first install)")
+    print("kernel-fixed: bcdUSB 0x0200 (0x0201 + BOS when the controller enables LPM), bMaxPacketSize0 64, "
+          "bcdHID 1.01, bInterval 10 ms at full speed / 1 ms at high speed")
 
     kbd = keyboard_report_descriptor(cfg.keyboard.descriptor == "extended")
     in_bits, out_bits = report_bit_sizes(kbd)
@@ -150,6 +156,8 @@ def cmd_check(args, cfg) -> int:
     if gadget.exists():
         st = gadget.status()
         print(f"  gadget {g.name}: {'bound to ' + st['udc']['udc'] + ', host state ' + st['udc']['state'] + ', speed ' + st['udc']['current_speed'] if st.get('bound') else 'present, unbound'}")
+        if st.get("bound"):
+            print(f"  controller LPM: {st['udc']['lpm']} -> device descriptor bcdUSB on the wire: {st['udc']['bcdUSB_on_wire']}")
         for role, func in st.get("functions", {}).items():
             missing = [k for k in ("no_out_endpoint", "wakeup_on_write", "interval") if func.get(k) == "n/a"]
             if missing:

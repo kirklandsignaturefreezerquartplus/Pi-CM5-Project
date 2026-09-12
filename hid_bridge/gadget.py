@@ -15,6 +15,7 @@ import errno
 import json
 import logging
 import os
+import re
 import stat
 import subprocess
 import time
@@ -77,14 +78,32 @@ def list_udcs() -> list[str]:
         return []
 
 
-def udc_state(udc: str) -> dict[str, str]:
+def udc_lpm_enabled(udc: str) -> bool | None:
+    """Whether dwc2 runs with LPM enabled (decides bcdUSB 2.00 vs 2.01 + BOS).
+
+    Read from debugfs; None when debugfs is unavailable.
+    """
+    text = _read(f"/sys/kernel/debug/usb/{udc}/params")
+    match = re.search(r"^\s*lpm\s*[:=]\s*(\d)", text, re.M)
+    return None if not match else match.group(1) == "1"
+
+
+def udc_current_state(udc: str) -> str:
+    """Cheap read of /sys/class/udc/<udc>/state for the bridge's periodic poll."""
+    return _read(os.path.join(UDC_SYSFS, udc, "state"), "unknown")
+
+
+def udc_state(udc: str) -> dict:
     base = os.path.join(UDC_SYSFS, udc)
+    lpm = udc_lpm_enabled(udc)
     return {
         "udc": udc,
         "state": _read(os.path.join(base, "state"), "unknown"),
         "current_speed": _read(os.path.join(base, "current_speed"), "unknown"),
         "maximum_speed": _read(os.path.join(base, "maximum_speed"), "unknown"),
         "function": _read(os.path.join(base, "function"), ""),
+        "lpm": lpm,
+        "bcdUSB_on_wire": "unknown" if lpm is None else ("0x0201 (+BOS)" if lpm else "0x0200"),
     }
 
 
@@ -192,25 +211,30 @@ class Gadget:
         _write(self._p("idVendor"), f"0x{g.vendor_id:04x}")
         _write(self._p("idProduct"), f"0x{g.product_id:04x}")
         _write(self._p("bcdDevice"), f"0x{g.device_version:04x}")
-        _write(self._p("bcdUSB"), f"0x{g.usb_version:04x}")
+        # libcomposite recomputes bcdUSB (0x0200, or 0x0201 with LPM) and
+        # bMaxPacketSize0 (dwc2 EP0 = 64) when answering GET_DESCRIPTOR; write
+        # the values it will emit so configfs reflects the wire.
+        _write(self._p("bcdUSB"), "0x0200")
         _write(self._p("bDeviceClass"), "0x00")     # class defined per interface
         _write(self._p("bDeviceSubClass"), "0x00")
         _write(self._p("bDeviceProtocol"), "0x00")
-        _write(self._p("bMaxPacketSize0"), "0x08")
+        _write(self._p("bMaxPacketSize0"), "0x40")
         _write_optional(self._p("max_speed"), g.max_speed, "max_speed selection", self.warnings)
 
-        # Strings.  libcomposite assigns string IDs sequentially and stops at
-        # the first unset one, so manufacturer must be set for product to show,
-        # and leaving serial unset yields iSerialNumber = 0 like a cheap keyboard.
-        if g.manufacturer:
-            _write(self._p("strings", "0x409", "manufacturer"), g.manufacturer)
-        if g.product:
-            if not g.manufacturer:
-                self.warnings.append("gadget.product is ignored by the kernel while gadget.manufacturer is empty")
-            _write(self._p("strings", "0x409", "product"), g.product)
-        if g.serial:
-            _write(self._p("strings", "0x409", "serialnumber"), g.serial)
-        if not (g.manufacturer or g.product or g.serial):
+        # Strings.  Once the language directory exists libcomposite always
+        # allocates iManufacturer=1, iProduct=2, iSerialNumber=3 and answers an
+        # unset one with an empty string descriptor.  A real keyboard has
+        # either a set of real strings or none at all, so either fill all
+        # three or leave all three empty (no strings directory).
+        if g.manufacturer or g.product or g.serial:
+            for attr, value in (("manufacturer", g.manufacturer), ("product", g.product), ("serialnumber", g.serial)):
+                if value:
+                    _write(self._p("strings", "0x409", attr), value)
+                else:
+                    self.warnings.append(
+                        f"gadget.{attr} is empty: the kernel presents string #{('manufacturer', 'product', 'serialnumber').index(attr) + 1} "
+                        "as an empty descriptor; set it or clear all three strings")
+        else:
             os.rmdir(self._p("strings", "0x409"))
 
         # Configuration descriptor: bus powered (bit 7 always set), optional

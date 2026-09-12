@@ -16,8 +16,14 @@ class FakeHidg:
         self.fd = -1
         self.path = "<fake>"
 
-    def write_report(self, report, force=False):
+        self.get_reports = []
+        self.host_disabled = False
+
+    def write_report(self, report, force=False, get_report=None):
         assert len(report) == self.report_length
+        cache = report if get_report is None else get_report
+        if not self.get_reports or self.get_reports[-1] != cache:
+            self.get_reports.append(bytes(cache))
         if not force and report == self.last_report:
             return True
         self.reports.append(bytes(report))
@@ -26,6 +32,14 @@ class FakeHidg:
 
     def read_output_report(self):
         return None
+
+    @property
+    def poll_readable(self):
+        return not self.host_disabled
+
+    def host_state_changed(self, state):
+        if state == "configured":
+            self.host_disabled = False
 
     def stats(self):
         return {"sent": len(self.reports), "dropped": 0, "host_connected": True, "device": self.path}
@@ -183,6 +197,20 @@ class MousePassthroughTests(unittest.TestCase):
             bytes([1, 0, 0, 1]),
             bytes([0, 0, 0, 0]),
         ])
+
+    def test_get_report_cache_has_no_motion(self):
+        bridge = make_bridge()
+        src = attach(bridge, FakeDevice("M", keyboard=False, mouse=True))
+        src.dev.queue = [(li.EV_KEY, li.BTN_LEFT, 1), (li.EV_REL, li.REL_X, 40), SYN]
+        bridge._process(src)
+        self.assertEqual(bridge.mouse.reports, [bytes([1, 40, 0, 0])])
+        self.assertEqual(bridge.mouse.get_reports[-1], bytes([1, 0, 0, 0]))
+        bridge = make_bridge(mouse_mode="absolute")
+        src = attach(bridge, FakeDevice("M", keyboard=False, mouse=True))
+        src.dev.queue = [(li.EV_REL, li.REL_WHEEL, -1), SYN]
+        bridge._process(src)
+        self.assertEqual(bridge.mouse.reports[-1][5], 0xFF)
+        self.assertEqual(bridge.mouse.get_reports[-1][5], 0)
 
     def test_hwheel_and_hires_ignored(self):
         bridge = make_bridge()
