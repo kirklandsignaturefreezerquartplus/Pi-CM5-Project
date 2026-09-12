@@ -110,6 +110,9 @@ def cmd_check(args, cfg) -> int:
           f"max_speed={g.max_speed} strings={'/'.join(filter(None, (g.manufacturer, g.product, g.serial))) or '(none)'}")
     attrs = 0x80 | (0x40 if g.self_powered else 0) | (0x20 if g.remote_wakeup else 0)
     print(f"config: bmAttributes=0x{attrs:02x} MaxPower={g.max_power_ma}mA, 2 interfaces (HID keyboard, HID mouse)")
+    if (g.vendor_id, g.product_id) == (0x1209, 0x0001):
+        print("  note: 0x1209:0x0001 is the pid.codes *test* ID; USB ID databases (lsusb, USBView) label it as such."
+              " Choose your own IDs in [gadget] if the device must not read as a test/hobby device")
     strings_set = [bool(g.manufacturer), bool(g.product), bool(g.serial)]
     if any(strings_set) and not all(strings_set):
         print("  note: set all of manufacturer/product/serial or none; an unset one becomes an empty string descriptor"

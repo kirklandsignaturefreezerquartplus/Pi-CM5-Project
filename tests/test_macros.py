@@ -104,6 +104,17 @@ class EngineTests(unittest.TestCase):
         # a: 30 + 20, wait 500, b: 30 + 20
         self.assertAlmostEqual(end, 0.6, places=6)
 
+    def test_jitter_bounds(self):
+        target = FakeTarget()
+        engine = MacroEngine(target, {"m": ["type ab", "wait 0"]}, tap_ms=30, step_ms=20, jitter_ms=40)
+        target.engine = engine
+        engine.start("m", now=0.0)
+        end = drain(engine, target)
+        # 2 taps + 2 gaps = 100 ms minimum, plus at most 4 * 40 ms jitter
+        self.assertGreaterEqual(end, 0.1)
+        self.assertLessEqual(end, 0.1 + 0.16 + 1e-9)
+        self.assertEqual(engine.tap_delay() if engine.jitter_ms == 0 else 0.03, 0.03)
+
     def test_nested_and_depth_limit(self):
         engine, target = self.make({"outer": ["macro inner", "b"], "inner": ["a"], "loop": ["macro loop"]})
         engine.start("outer")

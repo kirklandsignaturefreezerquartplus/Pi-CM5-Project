@@ -25,6 +25,7 @@ from __future__ import annotations
 import heapq
 import itertools
 import logging
+import random
 import shlex
 import time
 from dataclasses import dataclass, field
@@ -186,9 +187,9 @@ class MacroTask:
 
     def _run(self) -> Generator[float, None, None]:
         eng = self.engine
-        tap = eng.tap_ms / 1000.0
-        gap = eng.step_ms / 1000.0
         for step in self.steps:
+            tap = eng.tap_delay()
+            gap = eng.gap_delay()
             kind = step.kind
             if kind == "tap":
                 eng.press(step.keys)
@@ -213,9 +214,9 @@ class MacroTask:
                     usage, shift = entry
                     keys = (0xE1, usage) if shift else (usage,)
                     eng.press(keys)
-                    yield tap
+                    yield eng.tap_delay()
                     eng.release(keys)
-                    yield gap
+                    yield eng.gap_delay()
             elif kind == "wait":
                 yield step.ms / 1000.0
             elif kind == "mouse_move":
@@ -250,11 +251,14 @@ class MacroTask:
 
 
 class MacroEngine:
-    def __init__(self, target: MacroTarget, macros: dict[str, list[str]], tap_ms: int = 30, step_ms: int = 20):
+    def __init__(self, target: MacroTarget, macros: dict[str, list[str]], tap_ms: int = 30, step_ms: int = 20,
+                 jitter_ms: int = 0):
         self.target = target
         self.macros = macros
         self.tap_ms = tap_ms
         self.step_ms = step_ms
+        self.jitter_ms = jitter_ms
+        self._random = random.Random()
         self.pressed: set[int] = set()
         self.buttons = 0
         self._queue: list[_Scheduled] = []
@@ -263,6 +267,18 @@ class MacroEngine:
         self.running = 0
         self.completed = 0
         self.failed = 0
+
+    def _jitter(self) -> float:
+        return self._random.uniform(0, self.jitter_ms) / 1000.0 if self.jitter_ms else 0.0
+
+    def tap_delay(self) -> float:
+        """Hold time for a tap; randomised by ``jitter_ms`` so scripted input
+        does not have the metronomic cadence a keystroke-timing analysis
+        would flag."""
+        return self.tap_ms / 1000.0 + self._jitter()
+
+    def gap_delay(self) -> float:
+        return self.step_ms / 1000.0 + self._jitter()
 
     # -- state used by the bridge when merging reports ------------------------
     def press(self, keys: Iterable[int]) -> None:

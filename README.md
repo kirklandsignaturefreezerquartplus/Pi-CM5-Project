@@ -43,7 +43,10 @@ the KVM as a new game controller.
 
 `docs/usb-identity.md` is the field-by-field accounting, checked against the
 Raspberry Pi 6.12 kernel sources, of what is pinned, what the kernel decides,
-and how to verify the enumeration from Windows or a Linux host.
+what a deep inspection could still notice, and how to verify the enumeration
+from Windows or a Linux host.  `kernel-patches/` removes the remaining
+kernel-side tells (bcdHID 1.01, qualifier/LPM answers at full speed) for
+those who rebuild the kernel.
 
 ## Quick start (on the CM5)
 
@@ -134,6 +137,7 @@ hid_bridge/          Python package (stdlib only)
 config/config.toml   annotated default configuration
 systemd/             hid-gadget.service (oneshot) and hid-bridge.service
 tools/               verify-gadget.sh (CM5), windows/Get-HidBridgeDevices.ps1 (target)
+kernel-patches/      optional rpi-6.12.y patches removing kernel-side gadget tells
 docs/                hardware, usb-identity, pikvm, macros, troubleshooting
 tests/               unit tests (python3 -m unittest discover -s tests)
 ```

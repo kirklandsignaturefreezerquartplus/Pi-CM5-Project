@@ -90,7 +90,7 @@ class Bridge:
         self.by_path: dict[str, Source] = {}
         self.ignored: dict[str, str] = {}
         self.retry_after: dict[str, float] = {}
-        self.macro = MacroEngine(self, cfg.macros, b.tap_ms, b.step_ms)
+        self.macro = MacroEngine(self, cfg.macros, b.tap_ms, b.step_ms, b.macro_jitter_ms)
         self.max_usage = keyboard_max_array_usage(cfg.keyboard.descriptor)
         self.abs_pos = [ABS_MAX_VALUE // 2, ABS_MAX_VALUE // 2]
         self.leds = 0

@@ -1,0 +1,34 @@
+From: hid-bridge project
+Subject: [PATCH 1/2] usb: gadget: f_hid: report HID 1.10 and idle rate 0
+
+Real HID keyboards report bcdHID 0x0110; the function reported the
+obsolete 1.01.  The default idle rate was 1 (4 ms) although the function
+never re-sends unchanged reports; 0 ("indefinite", report on change only)
+describes the actual behaviour and is what real boot keyboards return once
+a host has configured them.
+
+---
+--- a/drivers/usb/gadget/function/f_hid.c
++++ b/drivers/usb/gadget/function/f_hid.c
+@@ -142,7 +142,7 @@
+ static struct hid_descriptor hidg_desc = {
+ 	.bLength			= sizeof hidg_desc,
+ 	.bDescriptorType		= HID_DT_HID,
+-	.bcdHID				= cpu_to_le16(0x0101),
++	.bcdHID				= cpu_to_le16(0x0110),
+ 	.bCountryCode			= 0x00,
+ 	.bNumDescriptors		= 0x1,
+ 	/*.rpt_desc.bDescriptorType	= DYNAMIC */
+@@ -1211,7 +1211,11 @@
+ 	hidg_interface_desc.bInterfaceProtocol = hidg->bInterfaceProtocol;
+ 	hidg_interface_desc.bNumEndpoints = hidg->use_out_ep ? 2 : 1;
+ 	hidg->protocol = HID_REPORT_PROTOCOL;
+-	hidg->idle = 1;
++	/*
++	 * Idle rate 0 = report only on change, which is what this function
++	 * actually does (it never re-sends unchanged reports).
++	 */
++	hidg->idle = 0;
+ 	hidg_ss_in_ep_desc.wMaxPacketSize = cpu_to_le16(hidg->report_length);
+ 	hidg_ss_in_comp_desc.wBytesPerInterval =
+ 				cpu_to_le16(hidg->report_length);

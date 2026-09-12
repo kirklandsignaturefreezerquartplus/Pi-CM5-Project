@@ -57,6 +57,27 @@ If a byte-exact match is required anyway, the routes are a kernel patch
 `lpm_capable`) or `raw-gadget`, where user space answers every control
 request itself.  Both are outside this project.
 
+## Deep inspection: what could still give the CM5 away
+
+Assume an inspector with a hardware USB analyser, a descriptor dumper and a
+USB ID database.  Nothing on the bus says "Raspberry Pi" or "Linux"; the
+residual tells are indirect:
+
+| Tell | Who sees it | Status |
+|---|---|---|
+| `bcdHID 1.01`, `GET_IDLE = 1`, qualifier answered at full speed, `bcdUSB 2.01` + BOS when LPM is on: together they fingerprint "Linux `usb_f_hid` on a dwc2 controller", i.e. a Raspberry Pi class board | analyser / dumper | **fixed by `kernel-patches/`** (kernel rebuild required) |
+| VID:PID `1209:0001` resolves to "pid.codes Test PID" in `usb.ids` | `lsusb`, USBView, any ID lookup | **your decision**: set `gadget.vendor_id/product_id`; `hid-bridge check` reminds you while the test ID is in use |
+| `GET_REPORT`/`SET_REPORT` for the *Feature* report type are accepted (real boot keyboards STALL them); `SET_REPORT` of any type lands in the LED path | analyser sending malformed class requests | kernel (`usb_f_hid` ignores the report type); harmless, not patched |
+| Remote wakeup advertised but a key press does not wake a suspended PC | functional test | kernel/dwc2, not fixable in software |
+| VBUS current ≈ 0 mA while declaring bus-powered 100 mA | USB power meter | hardware: the CM5 runs from its own supply |
+| The keyboard appears 15–25 s after the CM5 gets power and disconnects/reconnects whenever the CM5 or `hid-gadget.service` restarts | anyone watching enumeration | operational: power the CM5 before the PC, do not reboot it mid-session |
+| With the nRPIBOOT strap fitted (or boot media missing on some carriers) the BCM2712 boot ROM enumerates as a Broadcom boot device (`0a5c:2712`) on the same port | anyone | hardware: keep nRPIBOOT unfitted and boot media reliable |
+| Macro `type` steps with a fixed 30 ms/20 ms cadence look machine-generated in keystroke timing | timing analysis of typed text | `bridge.macro_jitter_ms` adds random jitter |
+
+Everything else — descriptors, report formats, boot-protocol handling,
+`GET_REPORT` answers, LED handling, string set, endpoint layout — matches a
+real two-interface keyboard/mouse device.
+
 ## Speed choice
 
 * **full-speed** (default): 12 Mbit/s like real keyboards and mice, 10 ms

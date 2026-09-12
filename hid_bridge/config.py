@@ -56,6 +56,7 @@ class BridgeConfig:
     rescan_interval_ms: int = 1000
     tap_ms: int = 30
     step_ms: int = 20
+    macro_jitter_ms: int = 0
     write_timeout_ms: int = 50
     forward_leds: bool = True
     control_socket: str = "/run/hid-bridge/ctl.sock"
@@ -157,7 +158,7 @@ def parse_config(data: dict[str, Any], path: str = "") -> Config:
         cfg.mouse.abs_to_rel_resolution = (_int(res[0], "width"), _int(res[1], "height"))
     _apply(mouse, cfg.mouse, "mouse", {"buttons", "poll_interval_ms"})
     _apply(data.get("bridge", {}), cfg.bridge, "bridge",
-           {"rescan_interval_ms", "tap_ms", "step_ms", "write_timeout_ms"})
+           {"rescan_interval_ms", "tap_ms", "step_ms", "macro_jitter_ms", "write_timeout_ms"})
 
     for index, raw in enumerate(data.get("inputs", [])):
         if not isinstance(raw, dict):
@@ -223,6 +224,8 @@ def validate(cfg: Config) -> None:
                          ("mouse.poll_interval_ms", cfg.mouse.poll_interval_ms)):
         if not 1 <= value <= 255:
             raise ConfigError(f"{label} must be within 1-255")
+    if cfg.bridge.macro_jitter_ms < 0:
+        raise ConfigError("bridge.macro_jitter_ms must be >= 0")
     if cfg.bridge.log_level.upper() not in ("DEBUG", "INFO", "WARNING", "ERROR"):
         raise ConfigError("bridge.log_level must be debug, info, warning or error")
     for rule in cfg.inputs:

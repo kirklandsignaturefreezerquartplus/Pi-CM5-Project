@@ -1,0 +1,64 @@
+From: hid-bridge project
+Subject: [PATCH 2/2] usb: gadget: composite: behave as a full-speed-only device when limited to full speed
+
+When the composite driver's max_speed is full speed (configfs max_speed =
+"full-speed") the host sees a device that never chirps.  Such a device must
+STALL DEVICE_QUALIFIER and OTHER_SPEED_CONFIGURATION requests (USB 2.0
+section 9.6.2), and USB 2.0 Link Power Management only exists for
+high-speed operation, so bcdUSB must stay 0x0200 and no BOS descriptor may
+be offered even when the controller hardware is LPM capable.  The
+controller's own max_speed stays high (dwc2 does not lower it), which is
+why the driver's limit has to be consulted here.
+
+---
+--- a/drivers/usb/gadget/composite.c
++++ b/drivers/usb/gadget/composite.c
+@@ -1839,7 +1839,14 @@
+ 					cdev->desc.bcdUSB = cpu_to_le16(0x0210);
+ 				}
+ 			} else {
+-				if (gadget->lpm_capable || cdev->use_webusb)
++				/*
++				 * USB 2.0 LPM (L1) only exists for high-speed
++				 * operation; a gadget limited to full speed must
++				 * not advertise it or a BOS descriptor.
++				 */
++				if ((gadget->lpm_capable &&
++				     cdev->driver->max_speed >= USB_SPEED_HIGH) ||
++				    cdev->use_webusb)
+ 					cdev->desc.bcdUSB = cpu_to_le16(0x0201);
+ 				else
+ 					cdev->desc.bcdUSB = cpu_to_le16(0x0200);
+@@ -1849,7 +1856,13 @@
+ 			memcpy(req->buf, &cdev->desc, value);
+ 			break;
+ 		case USB_DT_DEVICE_QUALIFIER:
++			/*
++			 * A gadget driver limited to full speed is a
++			 * full-speed-only device as far as the host can tell
++			 * and must reject qualifier requests (USB 2.0 9.6.2).
++			 */
+ 			if (!gadget_is_dualspeed(gadget) ||
++			    cdev->driver->max_speed < USB_SPEED_HIGH ||
+ 			    gadget->speed >= USB_SPEED_SUPER)
+ 				break;
+ 			device_qual(cdev);
+@@ -1858,6 +1871,7 @@
+ 			break;
+ 		case USB_DT_OTHER_SPEED_CONFIG:
+ 			if (!gadget_is_dualspeed(gadget) ||
++			    cdev->driver->max_speed < USB_SPEED_HIGH ||
+ 			    gadget->speed >= USB_SPEED_SUPER)
+ 				break;
+ 			fallthrough;
+@@ -1874,7 +1888,9 @@
+ 			break;
+ 		case USB_DT_BOS:
+ 			if (gadget_is_superspeed(gadget) ||
+-			    gadget->lpm_capable || cdev->use_webusb) {
++			    (gadget->lpm_capable &&
++			     cdev->driver->max_speed >= USB_SPEED_HIGH) ||
++			    cdev->use_webusb) {
+ 				value = bos_desc(cdev);
+ 				value = min(w_length, (u16) value);
+ 			}
