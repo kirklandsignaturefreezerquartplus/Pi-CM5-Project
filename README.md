@@ -48,6 +48,10 @@ from Windows or a Linux host.  `kernel-patches/` removes the remaining
 kernel-side tells (bcdHID 1.01, qualifier/LPM answers at full speed) for
 those who rebuild the kernel.
 
+**New here?  Read `docs/GUIDE.md`**, the step-by-step implementation, testing,
+deployment and use guide written for a first-time builder.  The rest of this
+README is the condensed reference.
+
 ## Quick start (on the CM5)
 
 Raspberry Pi OS Lite 64-bit (Bookworm or newer, Python ≥ 3.11).  No third-party
@@ -139,7 +143,7 @@ systemd/             hid-gadget.service (oneshot) and hid-bridge.service
 tools/               verify-gadget.sh (CM5), windows/Get-HidBridgeDevices.ps1 (target)
 kernel-patches/      optional rpi-6.12.y patches removing kernel-side gadget tells
 tools/identity-from-lsusb.py  turn an lsusb -v dump of a reference keyboard into [gadget] settings
-docs/                hardware, usb-identity, remaining-tells, pikvm, macros, troubleshooting
+docs/                GUIDE (start here), hardware, usb-identity, remaining-tells, pikvm, macros, troubleshooting
 tests/               unit tests (python3 -m unittest discover -s tests)
 ```
 

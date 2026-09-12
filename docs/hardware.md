@@ -32,9 +32,15 @@ keyboard has.  The modules `dwc2` and `libcomposite` are loaded from
 ## Power
 
 A PC USB port supplies at most 500 mA (900 mA on USB 3 ports).  A CM5 needs
-several times that, so **do not power the CM5 from link C**.  Power the carrier
-from its own supply (12 V barrel jack or PoE on the CM5 IO Board, or whatever
-your carrier provides).
+several times that, so **do not power the CM5 from link C**.
+
+On the official **CM5 IO Board** the USB-C connector is both the power input
+(USB-PD, 5 V/5 A) and the only place the USB 2.0 device port appears, so the
+kit's power supply and the target PC cannot share it.  Power the board another
+way: the PoE+ HAT for the CM5 IO Board with a PoE+ injector (recommended), or a
+regulated 5 V/5 A supply into the GPIO header's 5 V pins (check the board
+datasheet for your revision), or a carrier with a separate DC input.  Then use
+the USB-C for data only.  `docs/GUIDE.md` Part 2 compares the options.
 
 Two things to check on your specific carrier before connecting link C:
 
