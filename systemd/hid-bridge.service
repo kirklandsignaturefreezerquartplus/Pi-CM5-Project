@@ -1,0 +1,29 @@
+[Unit]
+Description=hid-bridge: forward PiKVM and macro-pad input to the USB HID gadget
+Documentation=file:///opt/hid-bridge/README.md
+After=hid-gadget.service
+Requires=hid-gadget.service
+ConditionPathExists=/etc/hid-bridge/config.toml
+
+[Service]
+Type=simple
+Environment=PYTHONPATH=/opt/hid-bridge
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -m hid_bridge run
+Restart=always
+RestartSec=1
+RuntimeDirectory=hid-bridge
+RuntimeDirectoryPreserve=yes
+# Latency matters: keep the daemon responsive under load.
+Nice=-10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=0
+# Hardening that still allows evdev, hidg and configfs access.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/run/hid-bridge /dev
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

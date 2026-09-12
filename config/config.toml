@@ -1,0 +1,102 @@
+# hid-bridge configuration  (installed to /etc/hid-bridge/config.toml)
+#
+# Integers may be written in decimal or 0x hex.  Run `hid-bridge check` after
+# editing to validate the file and print the descriptors the target will see.
+
+[gadget]
+# configfs directory name; no effect on the wire.
+name = "hidbridge"
+
+# USB vendor/product IDs presented to the target.  Windows and UEFI bind HID
+# boot devices by class, never by these IDs, so any value works.  The default
+# is the pid.codes "test" pair, explicitly reserved for private/lab use.  Set
+# your own if you need a stable, unique hardware ID in Device Manager.
+vendor_id = 0x1209
+product_id = 0x0001
+device_version = 0x0100   # bcdDevice
+usb_version = 0x0110      # bcdUSB requested (see docs/usb-identity.md; kernel may report 2.00/2.10)
+
+# String descriptors.  Leave `serial` empty for iSerialNumber = 0, which is
+# what most inexpensive keyboards report.  `product` only appears when
+# `manufacturer` is also set (libcomposite allocates string IDs in order).
+manufacturer = "Generic"
+product = "USB Keyboard"
+serial = ""
+
+# Enumerate as a USB 1.1 style full-speed device (12 Mbit/s), never
+# high-speed.  Options: full-speed | high-speed | low-speed (dwc2 cannot do
+# low-speed device mode; the kernel will refuse or ignore it).
+max_speed = "full-speed"
+
+# Configuration descriptor power attributes.
+self_powered = false      # bmAttributes bit 6; false = looks bus powered like a real keyboard
+remote_wakeup = true      # bmAttributes bit 5 + wake the PC on key press when the kernel supports it
+max_power_ma = 100        # MaxPower
+
+# Force a specific UDC name (see /sys/class/udc); empty = the first one found.
+udc = ""
+
+[keyboard]
+# "boot"     = the byte-exact HID 1.11 boot keyboard descriptor (usages 0x00-0x65).
+# "extended" = same report format, key array widened to 0x00-0xFF so F13-F24 and
+#              international keys are deliverable.  Both are boot-protocol compatible.
+descriptor = "boot"
+poll_interval_ms = 10     # bInterval (only applied when the kernel exposes f_hid 'interval')
+
+[mouse]
+# "relative" = classic boot-protocol mouse + wheel (4-byte reports). Works in UEFI/BIOS.
+# "absolute" = tablet-style absolute pointer 0..32767 (what PiKVM uses by default).
+#              Not a boot mouse; needs an OS.  Set PiKVM to relative mode when using
+#              "relative" here, or leave PiKVM absolute and let the bridge convert.
+mode = "relative"
+buttons = 3               # 3 or 5 (5 adds back/forward)
+poll_interval_ms = 2
+# Absolute source -> relative output: the source range is mapped onto this
+# virtual screen size to produce pixel deltas.
+abs_to_rel_resolution = [1920, 1080]
+# Relative source -> absolute output: absolute units (0..32767) per count.
+rel_to_abs_gain = 17.0
+
+[bridge]
+grab_inputs = true        # EVIOCGRAB every source so the CM5's own console never sees the keys
+rescan_interval_ms = 1000 # hot-plug detection period
+tap_ms = 30               # key/button hold time for macro taps and typing
+step_ms = 20              # pause between macro steps
+write_timeout_ms = 50     # how long to wait for the host to poll before dropping a report
+forward_leds = true       # send Caps/Num/Scroll Lock state from the target back to the sources
+control_socket = "/run/hid-bridge/ctl.sock"
+log_level = "info"        # debug | info | warning | error
+
+# ---------------------------------------------------------------------------
+# Input rules: evaluated top to bottom, first match wins, default is
+# pass-through for every keyboard/mouse.  Match on any subset of
+#   name    regex against the evdev device name   (hid-bridge inputs)
+#   phys    regex against the physical USB path   (e.g. "usb-xhci-hcd\\.0-1/")
+#   vendor / product   USB IDs
+# role: passthrough | macro | ignore
+#
+# Example: a macro keypad whose keys launch macros instead of being forwarded.
+# [[inputs]]
+# label = "stream deck knock-off"
+# vendor = 0x1a2c
+# product = 0x2d43
+# role = "macro"
+# unbound = "drop"        # keys without a binding: drop | passthrough
+# [inputs.bindings]
+# KEY_1 = "ctrl_alt_del"
+# KEY_2 = "win_lock"
+# KEY_3 = "sim_pause"
+#
+# Example: never forward the keyboard you use to administer the CM5 itself.
+# [[inputs]]
+# name = "^Dell KB216"
+# role = "ignore"
+
+# ---------------------------------------------------------------------------
+# Macros: name = [steps].  See docs/macros.md for the step language.
+[macros]
+ctrl_alt_del = ["ctrl+alt+delete"]
+win_lock = ["win+l"]
+task_manager = ["ctrl+shift+esc"]
+sim_pause = ["pause"]
+example_login = ["ctrl+alt+delete", "wait 1200", "type CHANGE-ME", "enter"]

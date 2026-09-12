@@ -1,0 +1,4 @@
+#!/bin/sh
+# Thin launcher for the hid_bridge Python package.
+export PYTHONPATH="${HID_BRIDGE_HOME:-/opt/hid-bridge}${PYTHONPATH:+:$PYTHONPATH}"
+exec /usr/bin/python3 -m hid_bridge "$@"

@@ -1,0 +1,22 @@
+[Unit]
+Description=USB HID gadget (keyboard + mouse) for hid-bridge
+Documentation=file:///opt/hid-bridge/README.md
+After=sys-kernel-config.mount systemd-modules-load.service systemd-udevd.service
+Requires=sys-kernel-config.mount
+Before=hid-bridge.service
+ConditionPathExists=/etc/hid-bridge/config.toml
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=PYTHONPATH=/opt/hid-bridge
+Environment=PYTHONUNBUFFERED=1
+ExecStartPre=-/sbin/modprobe dwc2
+ExecStartPre=-/sbin/modprobe libcomposite
+ExecStart=/usr/bin/python3 -m hid_bridge gadget up
+ExecStop=/usr/bin/python3 -m hid_bridge gadget down
+RuntimeDirectory=hid-bridge
+RuntimeDirectoryPreserve=yes
+
+[Install]
+WantedBy=multi-user.target
