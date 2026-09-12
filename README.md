@@ -138,7 +138,8 @@ config/config.toml   annotated default configuration
 systemd/             hid-gadget.service (oneshot) and hid-bridge.service
 tools/               verify-gadget.sh (CM5), windows/Get-HidBridgeDevices.ps1 (target)
 kernel-patches/      optional rpi-6.12.y patches removing kernel-side gadget tells
-docs/                hardware, usb-identity, pikvm, macros, troubleshooting
+tools/identity-from-lsusb.py  turn an lsusb -v dump of a reference keyboard into [gadget] settings
+docs/                hardware, usb-identity, remaining-tells, pikvm, macros, troubleshooting
 tests/               unit tests (python3 -m unittest discover -s tests)
 ```
 

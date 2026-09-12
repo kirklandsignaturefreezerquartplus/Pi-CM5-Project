@@ -1,0 +1,198 @@
+From: hid-bridge project
+Subject: [PATCH 4/4] usb: dwc2: gadget: implement remote wakeup; f_hid: wakeup_on_write
+
+STATUS: written against rpi-6.12.y and verified to apply, NOT yet tested on
+CM5 hardware.  Review the dwc2 hunk before deploying.
+
+dwc2 advertises remote wakeup capability (configfs bmAttributes bit 5) and
+records the host's SET_FEATURE(DEVICE_REMOTE_WAKEUP), but has no gadget
+.wakeup operation, so no function can ever initiate resume signalling.  Add
+one that mirrors the device-mode path of the wakeup-detected interrupt
+handler with remote wakeup signalling enabled (partial power down exit or
+clock-gating exit, else a plain DCTL.RmtWkUpSig), then clears RmtWkUpSig
+after 2-5 ms as USB 2.0 section 7.1.7.7 requires.  Hibernation exit is
+interrupt driven and is left as -EOPNOTSUPP.
+
+Give usb_f_hid a wakeup_on_write attribute: when set and the composite
+device is suspended, a write to /dev/hidgN requests remote wakeup before
+queueing, so a key press on a suspended host wakes it like a real keyboard.
+
+---
+--- a/drivers/usb/dwc2/gadget.c
++++ b/drivers/usb/dwc2/gadget.c
+@@ -4793,12 +4793,94 @@
+ 	spin_unlock_irqrestore(&hsotg->lock, flags);
+ }
+ 
++/**
++ * dwc2_hsotg_gadget_wakeup - initiate USB remote wakeup from device mode
++ * @gadget: The usb gadget state
++ *
++ * Called by gadget functions (usb_gadget_wakeup()) when the host has
++ * suspended the bus, enabled DEVICE_REMOTE_WAKEUP and the function has
++ * new data, e.g. a key press.  Mirrors the device-mode half of
++ * dwc2_handle_wakeup_detected_intr() but with remote wakeup signalling
++ * enabled, and clears the RmtWkUpSig bit again after the 1-15 ms the USB
++ * specification allows (section 7.1.7.7).  Must be called from process
++ * context.
++ */
++static int dwc2_hsotg_gadget_wakeup(struct usb_gadget *gadget)
++{
++	struct dwc2_hsotg *hsotg = to_hsotg(gadget);
++	unsigned long flags;
++	bool signalled = false;
++	u32 dctl;
++	int ret = 0;
++
++	spin_lock_irqsave(&hsotg->lock, flags);
++
++	if (!hsotg->remote_wakeup_allowed) {
++		dev_dbg(hsotg->dev, "%s: remote wakeup not enabled by host\n",
++			__func__);
++		ret = -EINVAL;
++		goto out;
++	}
++
++	if (hsotg->lx_state != DWC2_L2) {
++		/* Not suspended (or in L1, which ep_queue exits itself) */
++		ret = -EINVAL;
++		goto out;
++	}
++
++	if (hsotg->hibernated) {
++		/* Device-mode hibernation exit is driven by GPWRDN interrupts */
++		ret = -EOPNOTSUPP;
++		goto out;
++	}
++
++	if (hsotg->in_ppd) {
++		ret = dwc2_exit_partial_power_down(hsotg, 1, true);
++		if (ret) {
++			dev_err(hsotg->dev, "exit partial_power_down failed\n");
++			goto out;
++		}
++		call_gadget(hsotg, resume);
++		signalled = true;
++	} else if (hsotg->params.power_down == DWC2_POWER_DOWN_PARAM_NONE &&
++		   hsotg->bus_suspended && !hsotg->params.no_clock_gating) {
++		/* Ungate clocks, sets RmtWkUpSig and returns to L0 */
++		dwc2_gadget_exit_clock_gating(hsotg, 1);
++		signalled = true;
++	} else {
++		dctl = dwc2_readl(hsotg, DCTL);
++		dctl |= DCTL_RMTWKUPSIG;
++		dwc2_writel(hsotg, dctl, DCTL);
++		call_gadget(hsotg, resume);
++		hsotg->lx_state = DWC2_L0;
++		hsotg->bus_suspended = false;
++		signalled = true;
++	}
++
++out:
++	spin_unlock_irqrestore(&hsotg->lock, flags);
++
++	if (signalled) {
++		/* Drive resume signalling for 1-15 ms, then release the bus */
++		usleep_range(2000, 5000);
++		spin_lock_irqsave(&hsotg->lock, flags);
++		dctl = dwc2_readl(hsotg, DCTL);
++		dctl &= ~DCTL_RMTWKUPSIG;
++		dwc2_writel(hsotg, dctl, DCTL);
++		spin_unlock_irqrestore(&hsotg->lock, flags);
++		dev_dbg(hsotg->dev, "%s: remote wakeup signalled\n", __func__);
++	}
++
++	return ret;
++}
++
+ static const struct usb_gadget_ops dwc2_hsotg_gadget_ops = {
+ 	.get_frame	= dwc2_hsotg_gadget_getframe,
+ 	.set_selfpowered	= dwc2_hsotg_set_selfpowered,
+ 	.udc_start		= dwc2_hsotg_udc_start,
+ 	.udc_stop		= dwc2_hsotg_udc_stop,
+ 	.pullup                 = dwc2_hsotg_pullup,
++	.wakeup			= dwc2_hsotg_gadget_wakeup,
+ 	.udc_set_speed		= dwc2_gadget_set_speed,
+ 	.vbus_session		= dwc2_hsotg_vbus_session,
+ 	.vbus_draw		= dwc2_hsotg_vbus_draw,
+--- a/drivers/usb/gadget/function/u_hid.h
++++ b/drivers/usb/gadget/function/u_hid.h
+@@ -22,6 +22,7 @@
+ 	unsigned char			protocol;
+ 	unsigned char			no_out_endpoint;
+ 	unsigned char			strict_report_types;
++	unsigned char			wakeup_on_write;
+ 	unsigned short			report_length;
+ 	unsigned short			report_desc_length;
+ 	unsigned char			*report_desc;
+--- a/drivers/usb/gadget/function/f_hid.c
++++ b/drivers/usb/gadget/function/f_hid.c
+@@ -83,6 +83,12 @@
+ 	 *              accepted for Output reports; anything else is STALLed.
+ 	 */
+ 	bool				strict_report_types;
++	/*
++	 * wakeup_on_write - if true, a write while the bus is suspended first
++	 *              requests USB remote wakeup, as a real keyboard does when
++	 *              a key is pressed while the host sleeps.
++	 */
++	bool				wakeup_on_write;
+ 
+ 	/* recv report */
+ 	spinlock_t			read_spinlock;
+@@ -479,10 +485,19 @@
+ 			    size_t count, loff_t *offp)
+ {
+ 	struct f_hidg *hidg  = file->private_data;
++	struct usb_composite_dev *cdev = hidg->func.config->cdev;
+ 	struct usb_request *req;
+ 	unsigned long flags;
+ 	ssize_t status = -ENOMEM;
+ 
++	/*
++	 * New data while the host has us suspended: ask for remote wakeup
++	 * before queueing, otherwise the request cannot be submitted.  The
++	 * UDC refuses (-EINVAL) when the host did not enable remote wakeup.
++	 */
++	if (hidg->wakeup_on_write && cdev->suspended)
++		usb_gadget_wakeup(cdev->gadget);
++
+ 	spin_lock_irqsave(&hidg->write_spinlock, flags);
+ 
+ 	if (!hidg->req) {
+@@ -1397,6 +1412,7 @@
+ F_HID_OPT(protocol, 8, 255);
+ F_HID_OPT(no_out_endpoint, 8, 1);
+ F_HID_OPT(strict_report_types, 8, 1);
++F_HID_OPT(wakeup_on_write, 8, 1);
+ F_HID_OPT(report_length, 16, 65535);
+ 
+ static ssize_t f_hid_opts_report_desc_show(struct config_item *item, char *page)
+@@ -1458,6 +1474,7 @@
+ 	&f_hid_opts_attr_protocol,
+ 	&f_hid_opts_attr_no_out_endpoint,
+ 	&f_hid_opts_attr_strict_report_types,
++	&f_hid_opts_attr_wakeup_on_write,
+ 	&f_hid_opts_attr_report_length,
+ 	&f_hid_opts_attr_report_desc,
+ 	&f_hid_opts_attr_dev,
+@@ -1604,6 +1621,7 @@
+ 	}
+ 	hidg->use_out_ep = !opts->no_out_endpoint;
+ 	hidg->strict_report_types = opts->strict_report_types;
++	hidg->wakeup_on_write = opts->wakeup_on_write;
+ 
+ 	++opts->refcnt;
+ 	mutex_unlock(&opts->lock);
+--- a/Documentation/ABI/testing/configfs-usb-gadget-hid
++++ b/Documentation/ABI/testing/configfs-usb-gadget-hid
+@@ -19,4 +19,9 @@
+ 					Output reports; STALL other report
+ 					types as a device without Feature
+ 					reports does
++		wakeup_on_write		if 1, a write to /dev/hidg<N> while
++					the bus is suspended first requests
++					USB remote wakeup (the UDC must
++					implement it and the host must have
++					enabled it)
+ 		===================	====================================

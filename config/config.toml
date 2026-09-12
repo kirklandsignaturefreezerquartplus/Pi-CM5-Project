@@ -35,9 +35,10 @@ max_speed = "full-speed"
 
 # Configuration descriptor power attributes.
 self_powered = false      # bmAttributes bit 6; false = looks bus powered like a real keyboard
-remote_wakeup = true      # bmAttributes bit 5, as real keyboards advertise. NOTE: the CM5's dwc2
-                          # driver cannot initiate remote wakeup, so a key press will not wake a
-                          # sleeping PC even though the bit is set.
+remote_wakeup = true      # bmAttributes bit 5, as real keyboards advertise. A key press only wakes a
+                          # sleeping PC with kernel-patches/0004 installed (stock dwc2 cannot signal
+                          # remote wakeup); set false to keep descriptor and behaviour consistent
+                          # on a stock kernel.
 max_power_ma = 100        # MaxPower
 
 # Force a specific UDC name (see /sys/class/udc); empty = the first one found.

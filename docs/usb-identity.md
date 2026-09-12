@@ -39,7 +39,7 @@ checked against the Raspberry Pi `rpi-6.12.y` kernel sources.
 | bcdHID | 0x0110 | 0x0101 | constant in `usb_f_hid` |
 | bInterval | 8–10 ms (FS) | 10 ms at full speed, 1 ms at high speed | constants in `usb_f_hid`; the `poll_interval_ms` options only take effect on kernels that add an `interval` attribute |
 | DEVICE_QUALIFIER / OTHER_SPEED_CONFIGURATION at full speed | STALL (FS-only device) | answered (qualifier says high-speed capable) | `gadget->max_speed` stays HIGH because dwc2 does not read a DT `maximum-speed`; only `params.speed` is lowered |
-| Remote wakeup | bit advertised and functional | bit advertised, **not functional** | dwc2's gadget ops have no `.wakeup`; `usb_f_hid` has no `wakeup_on_write` in 6.12 |
+| Remote wakeup | bit advertised and functional | bit advertised, **not functional** on a stock kernel | dwc2's gadget ops have no `.wakeup` and `usb_f_hid` has no `wakeup_on_write` in 6.12; `kernel-patches/0004` adds both |
 | Unset strings | absent (index 0) | index allocated, empty string descriptor | `libcomposite` substitutes "" for unset strings once the language directory exists |
 
 Windows' HID class drivers and UEFI boot-keyboard drivers inspect none of
@@ -69,11 +69,14 @@ residual tells are indirect:
 | `bcdHID 1.01`, `GET_IDLE = 1`, qualifier answered at full speed, `bcdUSB 2.01` + BOS when LPM is on: together they fingerprint "Linux `usb_f_hid` on a dwc2 controller", i.e. a Raspberry Pi class board | analyser / dumper | **fixed by `kernel-patches/`** (kernel rebuild required) |
 | VID:PID `1209:0001` resolves to "pid.codes Test PID" in `usb.ids` | `lsusb`, USBView, any ID lookup | **your decision**: set `gadget.vendor_id/product_id`; `hid-bridge check` reminds you while the test ID is in use |
 | `GET_REPORT`/`SET_REPORT` for the *Feature* report type are accepted (real boot keyboards STALL them); `SET_REPORT` of any type lands in the LED path | analyser sending malformed class requests | **fixed by `kernel-patches/0003`** (`strict_report_types`, enabled automatically by `hid-bridge gadget up` when present); on a stock kernel the bridge additionally ignores any non-1-byte report in the LED path |
-| Remote wakeup advertised but a key press does not wake a suspended PC | functional test | kernel/dwc2, not fixable in software |
+| Remote wakeup advertised but a key press does not wake a suspended PC | functional test | **`kernel-patches/0004`** (dwc2 `.wakeup` + f_hid `wakeup_on_write`; applies cleanly, untested on hardware); otherwise set `remote_wakeup = false` |
 | VBUS current ≈ 0 mA while declaring bus-powered 100 mA | USB power meter | hardware: the CM5 runs from its own supply |
 | The keyboard appears 15–25 s after the CM5 gets power and disconnects/reconnects whenever the CM5 or `hid-gadget.service` restarts | anyone watching enumeration | operational: power the CM5 before the PC, do not reboot it mid-session |
 | With the nRPIBOOT strap fitted (or boot media missing on some carriers) the BCM2712 boot ROM enumerates as a Broadcom boot device (`0a5c:2712`) on the same port | anyone | hardware: keep nRPIBOOT unfitted and boot media reliable |
 | Macro `type` steps with a fixed 30 ms/20 ms cadence look machine-generated in keystroke timing | timing analysis of typed text | `bridge.macro_jitter_ms` adds random jitter |
+
+Recommended solves for every row that is not purely software are in
+`docs/remaining-tells.md`.
 
 Everything else — descriptors, report formats, boot-protocol handling,
 `GET_REPORT` answers, LED handling, string set, endpoint layout — matches a
