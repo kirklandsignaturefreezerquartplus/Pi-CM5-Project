@@ -69,6 +69,7 @@ class GadgetTests(unittest.TestCase):
         # optional attributes are absent in the fake tree -> warnings, not errors
         self.assertTrue(any("max_speed" in w for w in g.warnings))
         self.assertTrue(any("no_out_endpoint" in w for w in g.warnings))
+        self.assertTrue(any("strict_report_types" in w for w in g.warnings))
 
     def test_absolute_mouse_is_not_boot_protocol(self):
         self.cfg.mouse.mode = "absolute"

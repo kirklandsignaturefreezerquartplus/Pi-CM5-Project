@@ -250,6 +250,7 @@ class Gadget:
         _write(os.path.join(kbd, "report_length"), str(KEYBOARD_REPORT_LENGTH))
         _write(os.path.join(kbd, "report_desc"), self.keyboard_descriptor())
         _write_optional(os.path.join(kbd, "no_out_endpoint"), "1", "single-IN-endpoint HID (no_out_endpoint)", self.warnings)
+        _write_optional(os.path.join(kbd, "strict_report_types"), "1", "report-type checking of GET/SET_REPORT (strict_report_types, see kernel-patches/)", self.warnings)
         if g.remote_wakeup:
             _write_optional(os.path.join(kbd, "wakeup_on_write"), "1", "remote wakeup on keypress (wakeup_on_write)", self.warnings)
         _write_optional(os.path.join(kbd, "interval"), str(self.cfg.keyboard.poll_interval_ms), "keyboard bInterval", self.warnings)
@@ -266,6 +267,7 @@ class Gadget:
         _write(os.path.join(mouse, "report_length"), str(mouse_report_length(self.cfg.mouse.mode)))
         _write(os.path.join(mouse, "report_desc"), self.mouse_descriptor())
         _write_optional(os.path.join(mouse, "no_out_endpoint"), "1", "single-IN-endpoint HID (no_out_endpoint)", self.warnings)
+        _write_optional(os.path.join(mouse, "strict_report_types"), "1", "report-type checking of GET/SET_REPORT (strict_report_types, see kernel-patches/)", self.warnings)
         _write_optional(os.path.join(mouse, "interval"), str(self.cfg.mouse.poll_interval_ms), "mouse bInterval", self.warnings)
 
         # Interface order = link order: keyboard first, mouse second.
@@ -388,6 +390,7 @@ class Gadget:
                     "subclass": _read(os.path.join(base, "subclass")),
                     "report_length": _read(os.path.join(base, "report_length")),
                     "no_out_endpoint": _read(os.path.join(base, "no_out_endpoint"), "n/a"),
+                    "strict_report_types": _read(os.path.join(base, "strict_report_types"), "n/a"),
                     "wakeup_on_write": _read(os.path.join(base, "wakeup_on_write"), "n/a"),
                     "interval": _read(os.path.join(base, "interval"), "n/a"),
                     "dev": _read(os.path.join(base, "dev"), "n/a"),

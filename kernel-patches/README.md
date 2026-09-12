@@ -1,6 +1,6 @@
 # Optional kernel patches: remove the last Linux-gadget tells
 
-Everything `hid-bridge` can pin from user space is pinned.  Three details are
+Everything `hid-bridge` can pin from user space is pinned.  Four details are
 decided inside the kernel and remain visible to a descriptor dumper or USB
 analyser (never to Windows or UEFI, which do not look at them):
 
@@ -10,6 +10,7 @@ analyser (never to Windows or UEFI, which do not look at them):
 | `GET_IDLE` default | 1 (4 ms) although nothing is ever re-sent | 0 (report on change), consistent |
 | At full speed: `DEVICE_QUALIFIER` / `OTHER_SPEED_CONFIGURATION` | answered (device claims high-speed capability it never used) | STALLed, like every full-speed-only keyboard |
 | At full speed: `bcdUSB` / BOS when the dwc2 core has LPM enabled | 2.01 + BOS with an LPM capability | 2.00, no BOS |
+| `GET_REPORT` for Output/Feature, `SET_REPORT` for Input/Feature | answered / accepted regardless of report type | STALLed via the new `strict_report_types` attribute (0003), which `hid-bridge gadget up` enables when present |
 
 The patches are generated from and verified against the `rpi-6.12.y` branch of
 https://github.com/raspberrypi/linux.  They are small, affect only gadget

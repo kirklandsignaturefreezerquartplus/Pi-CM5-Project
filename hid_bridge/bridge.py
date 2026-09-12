@@ -10,7 +10,7 @@ import time
 from . import linux_input as li
 from .config import Config, InputRule
 from .control import ControlServer
-from .descriptors import ABS_MAX_VALUE, KEYBOARD_REPORT_LENGTH, mouse_report_length
+from .descriptors import ABS_MAX_VALUE, KEYBOARD_OUTPUT_LENGTH, KEYBOARD_REPORT_LENGTH, mouse_report_length
 from .gadget import udc_current_state, udc_state
 from .hidg import HidgDevice
 from .keymap import CODE_NAMES, EVDEV_TO_HID, KEY_CODES
@@ -232,6 +232,12 @@ class Bridge:
     def _handle_leds(self) -> None:
         data = self.kbd.read_output_report()
         if not data:
+            return
+        if len(data) != KEYBOARD_OUTPUT_LENGTH:
+            # Only the 1-byte LED Output report exists.  Anything else is a
+            # SET_REPORT of another type that an unpatched usb_f_hid let
+            # through (kernel-patches/0003 makes the kernel STALL it).
+            log.debug("ignoring %d-byte SET_REPORT that is not the LED report", len(data))
             return
         leds = data[0]
         if leds == self.leds:

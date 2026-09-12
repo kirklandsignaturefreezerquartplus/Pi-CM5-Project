@@ -24,6 +24,7 @@ checked against the Raspberry Pi `rpi-6.12.y` kernel sources.
 | Report descriptor (mouse) | boot mouse + wheel | the first 3 report bytes are the boot format |
 | Report IDs | none | |
 | `GET_REPORT(Input)` | current key / button state, immediately | the bridge keeps `usb_f_hid`'s GET_REPORT cache current (`GADGET_HID_WRITE_GET_REPORT`, kernel ≥ 6.10); without it the kernel would stall the request for 2.5 s and answer zeros |
+| `GET_REPORT(Output/Feature)`, `SET_REPORT(Input/Feature)` | STALL, like a device with only Input and Output reports | `strict_report_types` from `kernel-patches/0003`; stock kernels answer them |
 | `SET_PROTOCOL` / `GET_PROTOCOL` | accepted on both boot interfaces | `usb_f_hid` stores it; our reports already are boot format so nothing changes |
 | `SET_IDLE` / `GET_IDLE` | accepted | idle-rate re-sends are not implemented by `usb_f_hid`; Windows and UEFI set idle 0 anyway |
 | LED `SET_REPORT` | 1 byte over EP0 | forwarded to the PiKVM keyboard as EV_LED |
@@ -67,7 +68,7 @@ residual tells are indirect:
 |---|---|---|
 | `bcdHID 1.01`, `GET_IDLE = 1`, qualifier answered at full speed, `bcdUSB 2.01` + BOS when LPM is on: together they fingerprint "Linux `usb_f_hid` on a dwc2 controller", i.e. a Raspberry Pi class board | analyser / dumper | **fixed by `kernel-patches/`** (kernel rebuild required) |
 | VID:PID `1209:0001` resolves to "pid.codes Test PID" in `usb.ids` | `lsusb`, USBView, any ID lookup | **your decision**: set `gadget.vendor_id/product_id`; `hid-bridge check` reminds you while the test ID is in use |
-| `GET_REPORT`/`SET_REPORT` for the *Feature* report type are accepted (real boot keyboards STALL them); `SET_REPORT` of any type lands in the LED path | analyser sending malformed class requests | kernel (`usb_f_hid` ignores the report type); harmless, not patched |
+| `GET_REPORT`/`SET_REPORT` for the *Feature* report type are accepted (real boot keyboards STALL them); `SET_REPORT` of any type lands in the LED path | analyser sending malformed class requests | **fixed by `kernel-patches/0003`** (`strict_report_types`, enabled automatically by `hid-bridge gadget up` when present); on a stock kernel the bridge additionally ignores any non-1-byte report in the LED path |
 | Remote wakeup advertised but a key press does not wake a suspended PC | functional test | kernel/dwc2, not fixable in software |
 | VBUS current ≈ 0 mA while declaring bus-powered 100 mA | USB power meter | hardware: the CM5 runs from its own supply |
 | The keyboard appears 15–25 s after the CM5 gets power and disconnects/reconnects whenever the CM5 or `hid-gadget.service` restarts | anyone watching enumeration | operational: power the CM5 before the PC, do not reboot it mid-session |

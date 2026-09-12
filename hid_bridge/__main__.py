@@ -162,7 +162,7 @@ def cmd_check(args, cfg) -> int:
         if st.get("bound"):
             print(f"  controller LPM: {st['udc']['lpm']} -> device descriptor bcdUSB on the wire: {st['udc']['bcdUSB_on_wire']}")
         for role, func in st.get("functions", {}).items():
-            missing = [k for k in ("no_out_endpoint", "wakeup_on_write", "interval") if func.get(k) == "n/a"]
+            missing = [k for k in ("no_out_endpoint", "strict_report_types", "wakeup_on_write", "interval") if func.get(k) == "n/a"]
             if missing:
                 print(f"  {role}: kernel lacks optional f_hid attribute(s): {', '.join(missing)}")
     else:

@@ -171,6 +171,16 @@ class KeyboardPassthroughTests(unittest.TestCase):
         bridge._process(src)
         self.assertEqual(bridge.kbd.reports[-1][2], 0x68)
 
+    def test_non_led_set_report_ignored(self):
+        bridge = make_bridge()
+        src = attach(bridge, FakeDevice())
+        bridge.kbd.read_output_report = lambda: bytes(8)  # a SET_REPORT(Input) sneaking through
+        bridge._handle_leds()
+        self.assertEqual(src.dev.leds, {})
+        bridge.kbd.read_output_report = lambda: bytes([0b100])
+        bridge._handle_leds()
+        self.assertTrue(src.dev.leds[li.LED_SCROLLL])
+
     def test_leds_forwarded(self):
         bridge = make_bridge()
         src = attach(bridge, FakeDevice())
