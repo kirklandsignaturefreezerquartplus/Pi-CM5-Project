@@ -89,6 +89,14 @@ class HidgHostStateTests(unittest.TestCase):
         dev.write_report(bytes([0, 0, 4, 0, 0, 0, 0, 0]))
         self.assertFalse(dev.host_disabled)
 
+    def test_eagain_defers_without_dropping(self):
+        dev = self.make()
+        with mock.patch.object(hidg.os, "write", side_effect=BlockingIOError()):
+            self.assertFalse(dev.write_report(bytes([0, 0, 4, 0, 0, 0, 0, 0])))
+        self.assertEqual((dev.deferred, dev.dropped, dev.sent), (1, 0, 0))
+        self.assertIsNone(dev.last_report)
+        self.assertFalse(dev.disconnected)
+
     def test_eshutdown_is_a_disconnect(self):
         dev = self.make()
         with mock.patch.object(hidg.os, "write", side_effect=OSError(errno.ESHUTDOWN, "shutdown")):

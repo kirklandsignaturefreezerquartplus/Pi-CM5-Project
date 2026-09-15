@@ -18,6 +18,8 @@ class FakeHidg:
 
         self.get_reports = []
         self.host_disabled = False
+        self.disconnected = False
+        self.writable = True   # False = previous report still waiting for the host to poll
 
     def write_report(self, report, force=False, get_report=None):
         assert len(report) == self.report_length
@@ -26,6 +28,8 @@ class FakeHidg:
             self.get_reports.append(bytes(cache))
         if not force and report == self.last_report:
             return True
+        if not self.writable or self.disconnected:
+            return False
         self.reports.append(bytes(report))
         self.last_report = bytes(report)
         return True
@@ -321,6 +325,89 @@ class MacroDeviceTests(unittest.TestCase):
         self.assertEqual(status["macros"]["running"], 4)
         self.assertEqual(bridge.handle_control({"cmd": "release_all"}), {"released": True})
         self.assertEqual(bridge.kbd.last_report, bytes(8))
+
+
+class HostBackpressureTests(unittest.TestCase):
+    """The host stops polling for a while: latest state must win, nothing may stick."""
+
+    def test_key_released_during_stall_is_not_stuck(self):
+        bridge = make_bridge()
+        src = attach(bridge, FakeDevice())
+        src.dev.queue = [key("KEY_A", 1), SYN]
+        bridge._process(src)
+        self.assertEqual(bridge.kbd.reports[-1][2], 0x04)
+        bridge.kbd.writable = False                 # host busy / suspended
+        src.dev.queue = [key("KEY_A", 0), SYN, key("KEY_B", 1), SYN, key("KEY_B", 0), SYN]
+        bridge._process(src)
+        self.assertEqual(len(bridge.kbd.reports), 1)  # nothing could go out
+        self.assertTrue(bridge._kbd_dirty)
+        bridge.kbd.writable = True                  # host polls again
+        bridge._pump_keyboard()
+        self.assertEqual(bridge.kbd.reports[-1], bytes(8))   # current state, not a stale key-down
+        self.assertFalse(bridge._kbd_dirty)
+
+    def test_motion_accumulates_between_polls(self):
+        bridge = make_bridge()
+        src = attach(bridge, FakeDevice("M", keyboard=False, mouse=True))
+        bridge.mouse.writable = False
+        for dx in (5, 7, -2):
+            src.dev.queue = [(li.EV_REL, li.REL_X, dx), (li.EV_REL, li.REL_WHEEL, 1), SYN]
+            bridge._process(src)
+        self.assertEqual(bridge.mouse.reports, [])
+        bridge.mouse.writable = True
+        bridge._pump_mouse()
+        self.assertEqual(bridge.mouse.reports, [bytes([0, 10, 0, 3])])   # one report, summed like a real mouse
+        self.assertFalse(bridge._mouse_dirty)
+
+    def test_button_press_and_release_during_stall(self):
+        bridge = make_bridge()
+        src = attach(bridge, FakeDevice("M", keyboard=False, mouse=True))
+        bridge.mouse.writable = False
+        src.dev.queue = [(li.EV_KEY, li.BTN_LEFT, 1), SYN, (li.EV_KEY, li.BTN_LEFT, 0), SYN]
+        bridge._process(src)
+        bridge.mouse.writable = True
+        bridge._pump_mouse()
+        # buttons ended where they started and there was no motion: nothing to send
+        self.assertEqual(bridge.mouse.reports, [])
+        self.assertFalse(bridge._mouse_dirty)
+
+    def test_no_duplicate_idle_mouse_reports(self):
+        bridge = make_bridge()
+        src = attach(bridge, FakeDevice("M", keyboard=False, mouse=True))
+        src.dev.queue = [(li.EV_REL, li.REL_X, 3), SYN]
+        bridge._process(src)
+        bridge._emit_mouse_motion(0, 0, 0)
+        bridge._emit_mouse_motion(0, 0, 0)
+        self.assertEqual(bridge.mouse.reports, [bytes([0, 3, 0, 0])])
+
+    def test_motion_discarded_while_host_away_buttons_kept(self):
+        bridge = make_bridge()
+        src = attach(bridge, FakeDevice("M", keyboard=False, mouse=True))
+        bridge.mouse.disconnected = True
+        src.dev.queue = [(li.EV_REL, li.REL_X, 50), (li.EV_KEY, li.BTN_RIGHT, 1), SYN]
+        bridge._process(src)
+        self.assertEqual((bridge._mouse_dx, bridge._mouse_dy), (0, 0))
+        self.assertTrue(bridge._mouse_dirty)
+        bridge.mouse.disconnected = False
+        bridge._pump_mouse()
+        self.assertEqual(bridge.mouse.reports, [bytes([2, 0, 0, 0])])
+
+    def test_resync_after_host_returns(self):
+        bridge = make_bridge()
+        bridge.udc = "fake"
+        src = attach(bridge, FakeDevice())
+        src.dev.queue = [key("KEY_LEFTSHIFT", 1), SYN]
+        bridge._process(src)
+        bridge.kbd.host_disabled = True
+        bridge.kbd.last_report = None
+        import hid_bridge.bridge as bridge_module
+        original = bridge_module.udc_current_state
+        bridge_module.udc_current_state = lambda udc: "configured"
+        try:
+            bridge._poll_host_state()
+        finally:
+            bridge_module.udc_current_state = original
+        self.assertEqual(bridge.kbd.reports[-1][0], 0x02)   # shift still held: host told again
 
 
 class ShutdownTests(unittest.TestCase):

@@ -32,6 +32,87 @@ Device Descriptor:
 
 SAMPLE_SERIAL = SAMPLE.replace("iSerial                 0", "iSerial                 3 AB12CD34")
 
+SAMPLE_TOPOLOGY = SAMPLE + """
+    Interface Descriptor:
+      bLength                 9
+      bDescriptorType         4
+      bInterfaceNumber        0
+      bAlternateSetting       0
+      bNumEndpoints           1
+      bInterfaceClass         3 Human Interface Device
+      bInterfaceSubClass      1 Boot Interface Subclass
+      bInterfaceProtocol      1 Keyboard
+      iInterface              0
+        HID Device Descriptor:
+          bLength                 9
+          bDescriptorType        33
+          bcdHID               1.10
+          bCountryCode            0 Not supported
+          bNumDescriptors         1
+          bDescriptorType        34 Report
+          wDescriptorLength      65
+      Endpoint Descriptor:
+        bLength                 7
+        bDescriptorType         5
+        bEndpointAddress     0x81  EP 1 IN
+        bmAttributes            3
+          Transfer Type            Interrupt
+        wMaxPacketSize     0x0008  1x 8 bytes
+        bInterval               8
+    Interface Descriptor:
+      bLength                 9
+      bDescriptorType         4
+      bInterfaceNumber        1
+      bAlternateSetting       0
+      bNumEndpoints           2
+      bInterfaceClass         3 Human Interface Device
+      bInterfaceSubClass      0
+      bInterfaceProtocol      0
+      iInterface              0
+        HID Device Descriptor:
+          bLength                 9
+          bDescriptorType        33
+          bcdHID               1.10
+          bCountryCode            0 Not supported
+          bNumDescriptors         1
+          bDescriptorType        34 Report
+          wDescriptorLength     120
+      Endpoint Descriptor:
+        bLength                 7
+        bDescriptorType         5
+        bEndpointAddress     0x82  EP 2 IN
+        bmAttributes            3
+          Transfer Type            Interrupt
+        wMaxPacketSize     0x0010  1x 16 bytes
+        bInterval              10
+      Endpoint Descriptor:
+        bLength                 7
+        bDescriptorType         5
+        bEndpointAddress     0x02  EP 2 OUT
+        bmAttributes            3
+          Transfer Type            Interrupt
+        wMaxPacketSize     0x0010  1x 16 bytes
+        bInterval              10
+    Interface Descriptor:
+      bLength                 9
+      bDescriptorType         4
+      bInterfaceNumber        2
+      bAlternateSetting       0
+      bNumEndpoints           1
+      bInterfaceClass         3 Human Interface Device
+      bInterfaceSubClass      0
+      bInterfaceProtocol      0
+      iInterface              0
+      Endpoint Descriptor:
+        bLength                 7
+        bDescriptorType         5
+        bEndpointAddress     0x83  EP 3 IN
+        bmAttributes            3
+          Transfer Type            Interrupt
+        wMaxPacketSize     0x0008  1x 8 bytes
+        bInterval               8
+"""
+
 
 class IdentityToolTests(unittest.TestCase):
     def test_conversion(self):
@@ -54,6 +135,24 @@ class IdentityToolTests(unittest.TestCase):
         self.assertEqual(len(value), 8)
         self.assertNotEqual(value, "AB12CD34")
         self.assertTrue(value[0].isalpha() and value[2].isdigit())
+
+    def test_topology_warnings(self):
+        out = tool.convert(SAMPLE_TOPOLOGY)
+        self.assertIn("bcdUSB is 1.10", out)
+        self.assertIn("bMaxPacketSize0 is 8", out)
+        self.assertIn("reference has 3 interface(s)", out)
+        self.assertIn("interface 0: reference polls every 8 ms", out)
+        self.assertIn("interface 0: reference report descriptor is 65 bytes", out)
+        self.assertIn("interface 1: reference class/subclass/protocol (3, 0, 0)", out)
+        self.assertIn("interface 1: reference has 2 endpoint(s)", out)
+        self.assertIn("bcdHID 1.10", out)
+        self.assertIn("A descriptor dump of the clone will differ", out)
+        import tomllib
+        tomllib.loads(out)   # warnings are comments; still valid TOML
+
+    def test_no_interface_block_is_flagged(self):
+        out = tool.convert(SAMPLE)
+        self.assertIn("no interface descriptors found", out)
 
     def test_output_is_valid_toml(self):
         import tomllib

@@ -73,7 +73,6 @@ tap_ms = 30               # key/button hold time for macro taps and typing
 step_ms = 20              # pause between macro steps
 macro_jitter_ms = 0       # add 0..N ms of random jitter to macro taps/gaps so typed macros
                           # do not have a perfectly regular, machine-like cadence (try 40)
-write_timeout_ms = 50     # how long to wait for the host to poll before dropping a report
 forward_leds = true       # send Caps/Num/Scroll Lock state from the target back to the sources
 control_socket = "/run/hid-bridge/ctl.sock"
 log_level = "info"        # debug | info | warning | error

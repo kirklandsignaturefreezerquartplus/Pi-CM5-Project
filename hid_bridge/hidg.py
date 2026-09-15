@@ -11,9 +11,7 @@ import errno
 import fcntl
 import logging
 import os
-import select
 import struct
-import time
 
 log = logging.getLogger("hid-bridge.hidg")
 
@@ -30,19 +28,18 @@ GADGET_HID_WRITE_GET_REPORT = (1 << 30) | (USB_HIDG_REPORT.size << 16) | (ord("g
 
 
 class HidgDevice:
-    def __init__(self, path: str, report_length: int, label: str, write_timeout: float = 0.05,
-                 idle_report: bytes | None = None):
+    def __init__(self, path: str, report_length: int, label: str, idle_report: bytes | None = None):
         if report_length > HIDG_MAX_REPORT_LENGTH:
             raise ValueError("report_length exceeds usb_f_hid's 64-byte GET_REPORT limit")
         self.path = path
         self.report_length = report_length
         self.label = label
-        self.write_timeout = write_timeout
         self.idle_report = idle_report if idle_report is not None else bytes(report_length)
         self.fd = -1
         self.last_report: bytes | None = None
         self.sent = 0
         self.dropped = 0
+        self.deferred = 0
         self.disconnected = False
         # usb_f_hid marks the function "disabled" when the host de-configures
         # us; from then on its poll() reports readable forever and read()
@@ -96,10 +93,18 @@ class HidgDevice:
 
     # -- input reports ----------------------------------------------------------
     def write_report(self, report: bytes, force: bool = False, get_report: bytes | None = None) -> bool:
-        """Send ``report``; returns True on success.
+        """Try to send ``report`` once, without blocking.
 
-        Identical consecutive reports are suppressed unless ``force`` is set
-        (relative mouse reports must always go out because they carry motion).
+        Returns True when the report was handed to the kernel (or was
+        identical to the last one and ``force`` is not set).  Returns False
+        when it could not go out right now: either the previous report is
+        still waiting for the host to poll (``usb_f_hid`` keeps exactly one
+        IN request in flight; the fd becomes writable once it completes) or
+        the host is not connected.  The caller keeps its own "latest state"
+        and retries when the fd is writable, which is how a real keyboard or
+        mouse behaves: one report register, latest state wins, motion
+        accumulates between polls.
+
         ``get_report`` overrides what GET_REPORT should answer from now on;
         it defaults to ``report`` (correct for state-based reports).
         """
@@ -115,31 +120,26 @@ class HidgDevice:
         self.cache_get_report(report if get_report is None else get_report)
         if not force and report == self.last_report:
             return True
-        deadline = time.monotonic() + self.write_timeout
-        while True:
-            try:
-                os.write(self.fd, report)
-                self.last_report = report
-                self.sent += 1
-                if self.disconnected or self.host_disabled:
-                    log.info("%s: host connected again", self.label)
-                    self.disconnected = False
-                    self.host_disabled = False
-                    self._warned_disconnected = False
-                return True
-            except BlockingIOError:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    self.dropped += 1
-                    log.debug("%s: host not polling, report dropped", self.label)
-                    return False
-                select.select([], [self.fd], [], remaining)
-            except OSError as exc:
-                self.dropped += 1
-                if exc.errno in _DISCONNECT_ERRNOS:
-                    self._note_disconnect(exc)
-                    return False
-                raise
+        try:
+            os.write(self.fd, report)
+        except BlockingIOError:
+            # Previous report not yet collected by the host: retry when writable.
+            self.deferred += 1
+            return False
+        except OSError as exc:
+            self.dropped += 1
+            if exc.errno in _DISCONNECT_ERRNOS:
+                self._note_disconnect(exc)
+                return False
+            raise
+        self.last_report = report
+        self.sent += 1
+        if self.disconnected or self.host_disabled:
+            log.info("%s: host connected again", self.label)
+            self.disconnected = False
+            self.host_disabled = False
+            self._warned_disconnected = False
+        return True
 
     def _note_disconnect(self, exc: OSError) -> None:
         self.disconnected = True
@@ -173,6 +173,7 @@ class HidgDevice:
         return {
             "device": self.path,
             "sent": self.sent,
+            "deferred": self.deferred,
             "dropped": self.dropped,
             "host_connected": not (self.disconnected or self.host_disabled),
             "get_report_cache": self._get_report_supported,

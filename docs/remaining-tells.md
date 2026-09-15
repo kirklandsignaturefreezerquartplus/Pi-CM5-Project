@@ -63,9 +63,11 @@ metal-film part inside the adapter shell or a small breakout board.  Do
 **Trade-off:** a resistor draws the same current in suspend, whereas a real
 keyboard drops to ≤ 2.5 mA when the host suspends the bus.  A meter watching
 suspend current would still notice.  Solving that needs a switched load
-driven by a CM5 GPIO from the bridge's suspend state (`cdev->suspended` is
-exported in sysfs as `/sys/class/udc/*/device/suspended`); reasonable
-follow-up if suspend behaviour matters to you.
+driven by a CM5 GPIO from the gadget's suspend state, which libcomposite
+exports as `/sys/class/udc/<udc>/device/gadget.0/suspended` (the `gadget.N`
+device under the controller; also reachable as
+`/sys/bus/gadget/devices/gadget.0/suspended`); reasonable follow-up if
+suspend behaviour matters to you.
 
 Alternative: declare `self_powered = true` and `max_power_ma = 2`.  Honest
 and consistent with the meter, but self-powered keyboards are rare, so it is
@@ -98,8 +100,10 @@ wakeup exist but are the minority.
 arrival sound / Event Log during a session.
 
 **Recommended:**
-1. Power the CM5 from a supply that is independent of the PC (always-on
-   12 V or PoE).  The CM5 is then long booted before the PC's USB controller
+1. Power the CM5 from a supply that is independent of the PC: on the CM5 IO
+   Board that means the PoE+ HAT with an always-on PoE+ injector, or a 5 V
+   supply into the header (`docs/GUIDE.md` Part 2; the board has no separate
+   DC jack).  The CM5 is then long booted before the PC's USB controller
    powers up, and the PC sees a keyboard that was simply present, exactly as
    with a real one.  This removes the tell entirely for normal use.
 2. Do not restart `hid-gadget.service` or reboot the CM5 while the PC is in

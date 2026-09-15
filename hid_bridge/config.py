@@ -57,7 +57,6 @@ class BridgeConfig:
     tap_ms: int = 30
     step_ms: int = 20
     macro_jitter_ms: int = 0
-    write_timeout_ms: int = 50
     forward_leds: bool = True
     control_socket: str = "/run/hid-bridge/ctl.sock"
     log_level: str = "info"
@@ -158,7 +157,7 @@ def parse_config(data: dict[str, Any], path: str = "") -> Config:
         cfg.mouse.abs_to_rel_resolution = (_int(res[0], "width"), _int(res[1], "height"))
     _apply(mouse, cfg.mouse, "mouse", {"buttons", "poll_interval_ms"})
     _apply(data.get("bridge", {}), cfg.bridge, "bridge",
-           {"rescan_interval_ms", "tap_ms", "step_ms", "macro_jitter_ms", "write_timeout_ms"})
+           {"rescan_interval_ms", "tap_ms", "step_ms", "macro_jitter_ms"})
 
     for index, raw in enumerate(data.get("inputs", [])):
         if not isinstance(raw, dict):

@@ -117,10 +117,13 @@ in `[[inputs]]` rules; their keystrokes never reach the PC directly.
 * Sources are grabbed (`EVIOCGRAB`) so the CM5's own console never acts on
   forwarded keystrokes (Ctrl+Alt+Del included).  Unplugging a source releases
   every key it held.
-* If the PC is off or suspended, reports are dropped rather than queued. The
-  CM5's controller driver cannot initiate USB remote wakeup, so a key press
-  does not wake a sleeping PC (the descriptor bit is still advertised, as on
-  real keyboards).
+* The bridge behaves like the device it emulates: one report register per
+  interface, latest state wins, mouse motion accumulates between host polls.
+  If the PC stops polling (busy, suspended, off), nothing is queued and no
+  key can stick; the current state is delivered when polling resumes.  On a
+  stock kernel a key press does not wake a sleeping PC (see
+  `kernel-patches/0004`); the descriptor bit is still advertised, as on real
+  keyboards.
 * `GET_REPORT(Input)` on the control endpoint is answered instantly with the
   current key/button state, as a real keyboard does, via the kernel's
   GET_REPORT cache.

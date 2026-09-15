@@ -47,12 +47,13 @@ holds the device.  Run Raspberry Pi OS **Lite** on the CM5 and keep
 with ESHUTDOWN: the PC has not configured the device.  See the UDC section
 above.  Reports are dropped, not queued, until it does.
 
-## "host not polling, report dropped"
+## `deferred` keeps rising in `hid-bridge ctl status`
 
-The host enumerated the device but is not fetching interrupt reports:
-typically the PC is suspended.  The CM5's dwc2 driver cannot initiate USB
-remote wakeup, so a key press will not wake the PC; wake it by other means.
-The first report after resume carries the current key state.
+The host enumerated the device but is slow to fetch interrupt reports, or is
+suspended.  Nothing is lost: the bridge holds the latest key state and sums
+mouse motion until the host polls again, like a real device.  If the PC is
+asleep, a key press only wakes it with `kernel-patches/0004` installed; wake
+it by other means otherwise.
 
 ## A key seems stuck on the PC
 

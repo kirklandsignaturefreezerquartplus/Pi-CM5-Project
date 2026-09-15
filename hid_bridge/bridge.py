@@ -82,9 +82,18 @@ class Bridge:
     def __init__(self, cfg: Config, devices: dict):
         self.cfg = cfg
         b = cfg.bridge
-        timeout = b.write_timeout_ms / 1000.0
-        self.kbd = HidgDevice(devices["keyboard"], KEYBOARD_REPORT_LENGTH, "keyboard", timeout)
-        self.mouse = HidgDevice(devices["mouse"], mouse_report_length(cfg.mouse.mode), "mouse", timeout)
+        self.kbd = HidgDevice(devices["keyboard"], KEYBOARD_REPORT_LENGTH, "keyboard")
+        self.mouse = HidgDevice(devices["mouse"], mouse_report_length(cfg.mouse.mode), "mouse")
+        # "Device registers": what the host should receive next.  The keyboard
+        # report is recomputed from the merged key state at flush time; mouse
+        # motion accumulates between host polls exactly as a real mouse's
+        # counters do.  Nothing is ever queued or dropped; the latest state wins.
+        self._kbd_dirty = False
+        self._mouse_dirty = False
+        self._mouse_dx = 0
+        self._mouse_dy = 0
+        self._mouse_wheel = 0
+        self._mouse_last_buttons = 0
         self.udc = devices.get("udc", "")
         self.sources: dict[int, Source] = {}
         self.by_path: dict[str, Source] = {}
@@ -114,35 +123,73 @@ class Bridge:
             buttons |= src.buttons
         return buttons
 
+    MOTION_LIMIT = 32767  # accumulated counts saturate like a real mouse's counters
+
     def _flush_keyboard(self) -> None:
-        self.kbd.write_report(keyboard_report(self.all_usages(), self.max_usage))
+        self._kbd_dirty = True
+        self._pump_keyboard()
+
+    def _pump_keyboard(self) -> None:
+        """Send the current merged keyboard state if the host can take it."""
+        if not self._kbd_dirty:
+            return
+        if self.kbd.write_report(keyboard_report(self.all_usages(), self.max_usage)):
+            self._kbd_dirty = False
 
     def _emit_mouse_motion(self, dx: int, dy: int, wheel: int) -> None:
-        buttons = self.all_buttons()
-        n = self.cfg.mouse.buttons
         if self.cfg.mouse.mode == "relative":
-            # GET_REPORT on a relative mouse answers buttons with zero motion.
-            still = relative_mouse_reports(buttons, 0, 0, 0, n)[0]
-            for report in relative_mouse_reports(buttons, dx, dy, wheel, n):
-                self.mouse.write_report(report, force=True, get_report=still)
-            return
-        gain = self.cfg.mouse.rel_to_abs_gain
-        if dx or dy:
+            self._mouse_dx = clamp(self._mouse_dx + dx, -self.MOTION_LIMIT, self.MOTION_LIMIT)
+            self._mouse_dy = clamp(self._mouse_dy + dy, -self.MOTION_LIMIT, self.MOTION_LIMIT)
+        elif dx or dy:
+            gain = self.cfg.mouse.rel_to_abs_gain
             self.abs_pos[0] = clamp(self.abs_pos[0] + round(dx * gain), 0, ABS_MAX_VALUE)
             self.abs_pos[1] = clamp(self.abs_pos[1] + round(dy * gain), 0, ABS_MAX_VALUE)
-        report = absolute_mouse_report(buttons, self.abs_pos[0], self.abs_pos[1], wheel, n)
-        still = absolute_mouse_report(buttons, self.abs_pos[0], self.abs_pos[1], 0, n)
-        self.mouse.write_report(report, force=bool(wheel), get_report=still)
+        self._mouse_wheel = clamp(self._mouse_wheel + wheel, -self.MOTION_LIMIT, self.MOTION_LIMIT)
+        self._mouse_dirty = True
+        self._pump_mouse()
 
     def _emit_mouse_absolute(self, x: int | None, y: int | None, wheel: int) -> None:
         if x is not None:
             self.abs_pos[0] = x
         if y is not None:
             self.abs_pos[1] = y
+        self._mouse_wheel = clamp(self._mouse_wheel + wheel, -self.MOTION_LIMIT, self.MOTION_LIMIT)
+        self._mouse_dirty = True
+        self._pump_mouse()
+
+    def _pump_mouse(self) -> None:
+        """Send pending mouse state, one report per host poll slot."""
         n = self.cfg.mouse.buttons
-        report = absolute_mouse_report(self.all_buttons(), self.abs_pos[0], self.abs_pos[1], wheel, n)
-        still = absolute_mouse_report(self.all_buttons(), self.abs_pos[0], self.abs_pos[1], 0, n)
-        self.mouse.write_report(report, force=bool(wheel), get_report=still)
+        while self._mouse_dirty:
+            buttons = self.all_buttons()
+            cw = clamp(self._mouse_wheel, -127, 127)
+            if self.cfg.mouse.mode == "relative":
+                cx = clamp(self._mouse_dx, -127, 127)
+                cy = clamp(self._mouse_dy, -127, 127)
+                if not (cx or cy or cw) and buttons == self._mouse_last_buttons:
+                    self._mouse_dirty = False
+                    return
+                report = relative_mouse_reports(buttons, cx, cy, cw, n)[0]
+                # GET_REPORT on a relative mouse answers buttons with zero motion.
+                still = relative_mouse_reports(buttons, 0, 0, 0, n)[0]
+                if not self.mouse.write_report(report, force=True, get_report=still):
+                    if self.mouse.disconnected or self.mouse.host_disabled:
+                        # No host to deliver motion to: counters reset, buttons kept.
+                        self._mouse_dx = self._mouse_dy = self._mouse_wheel = 0
+                    return
+                self._mouse_dx -= cx
+                self._mouse_dy -= cy
+            else:
+                x, y = self.abs_pos
+                report = absolute_mouse_report(buttons, x, y, cw, n)
+                still = absolute_mouse_report(buttons, x, y, 0, n)
+                if not self.mouse.write_report(report, force=bool(cw), get_report=still):
+                    if self.mouse.disconnected or self.mouse.host_disabled:
+                        self._mouse_wheel = 0
+                    return
+            self._mouse_wheel -= cw
+            self._mouse_last_buttons = buttons
+            self._mouse_dirty = bool(self._mouse_dx or self._mouse_dy or self._mouse_wheel)
 
     # ----------------------------------------------------------- MacroTarget
     def macro_keys_changed(self) -> None:
@@ -386,9 +433,16 @@ class Bridge:
     def _poll_host_state(self) -> None:
         if not self.udc:
             return
+        was_away = self.kbd.host_disabled or self.mouse.host_disabled
         state = udc_current_state(self.udc)
         self.kbd.host_state_changed(state)
         self.mouse.host_state_changed(state)
+        if was_away and state == "configured":
+            # Re-sync the host with the current state after it came back.
+            self._kbd_dirty = True
+            self._mouse_dirty = True
+        self._pump_keyboard()
+        self._pump_mouse()
 
     def status(self) -> dict:
         return {
@@ -448,8 +502,15 @@ class Bridge:
                     rlist.append(self.kbd.fd)
                 if self.control is not None:
                     rlist.append(self.control.fileno())
+                # usb_f_hid reports POLLOUT once the host has collected the
+                # previous report; that is when pending state goes out.
+                wlist = []
+                if self._kbd_dirty and self.kbd.fd >= 0:
+                    wlist.append(self.kbd.fd)
+                if self._mouse_dirty and self.mouse.fd >= 0:
+                    wlist.append(self.mouse.fd)
                 try:
-                    readable, _, _ = select.select(rlist, [], [], timeout)
+                    readable, writable, _ = select.select(rlist, wlist, [], timeout)
                 except InterruptedError:
                     continue
                 except OSError as exc:
@@ -461,6 +522,11 @@ class Bridge:
                         except OSError:
                             self._remove_source(src, "fd closed")
                     continue
+                for fd in writable:
+                    if fd == self.kbd.fd:
+                        self._pump_keyboard()
+                    elif fd == self.mouse.fd:
+                        self._pump_mouse()
                 for fd in readable:
                     if fd == self._wake_r:
                         try:
@@ -483,6 +549,7 @@ class Bridge:
         for src in list(self.sources.values()):
             src.pressed.clear()
             src.buttons = 0
+        self._mouse_dx = self._mouse_dy = self._mouse_wheel = 0
         try:
             self.kbd.write_report(bytes(KEYBOARD_REPORT_LENGTH), force=True)
             self._emit_mouse_motion(0, 0, 0)
