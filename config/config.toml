@@ -29,7 +29,8 @@ serial = ""
 # gives 10 ms polling (fixed by the kernel's HID function).  "high-speed" is a
 # self-consistent USB 2.0 device with 1 ms polling, like a gaming keyboard.
 # At full speed the controller still answers a DEVICE_QUALIFIER request (it is
-# high-speed capable hardware); every OS and firmware tolerates that.
+# high-speed capable hardware); every OS and firmware tolerates that, and
+# kernel-patches/0002 makes it STALL like a full-speed-only keyboard.
 # "low-speed" is not usable with the CM5's controller.
 max_speed = "full-speed"
 

@@ -15,7 +15,7 @@ Line numbers refer to those unpatched files.
 |---|---|---|---|---|
 | 1 | VBUS current & suspend | restates `remaining-tells.md` §2 | same as ours | corrected the sysfs path we had given for the suspend state |
 | 2 | Boot ROM & enumeration timing | restates §4/§5 | same as ours | corrected our own "12 V" wording (the CM5 IO Board has no DC jack) |
-| 3 | Hardcoded bcdUSB / bMaxPacketSize0 | tell is real, mechanism wrong | **ineffective**: the kernel overwrites both regardless of configfs | documented; a kernel patch is the only route (offered as 0005) |
+| 3 | Hardcoded bcdUSB / bMaxPacketSize0 | tell is real, mechanism wrong | **ineffective**: the kernel overwrites both regardless of configfs | documented; a kernel patch is the only route (offered as a further patch, 0006) |
 | 4 | Interface topology & endpoints | premise backwards on OUT endpoints; underlying cloning gap real | over-scoped rewrite | identity tool now diffs the reference's descriptor tree and warns |
 | 5 | Remote wakeup | restates §3 / patch 0004 | same as ours | none; the review omits that 0004 is untested on hardware |
 | 6 | ConfigFS / f_hid quirks | true in theory, misframed | raw-gadget "custom kernel driver" | not recommended; explained |
@@ -44,8 +44,11 @@ at `/sys/class/udc/*/device/suspended`.  libcomposite creates the attribute
 on the *gadget* device (`composite.c:2448`, `device_create_file(&gadget->dev,
 &dev_attr_suspended)`), which the UDC core names `gadget.N` under the
 controller device (`core.c:1453`), while the `/sys/class/udc/<udc>` link
-points at the controller (`core.c:1417-1419`).  The path is therefore
-`/sys/class/udc/<udc>/device/gadget.0/suspended`.  Fixed.
+points at the controller (`core.c:1417-1419`) and also links the gadget
+device as `/sys/class/udc/<udc>/gadget` (`core.c:1459-1460`).  The path is
+therefore `/sys/class/udc/<udc>/gadget/suspended` (equivalently
+`/sys/bus/gadget/devices/gadget.N/suspended`).  Fixed; the bridge now reads
+the same attribute to recognise a suspended bus.
 
 ### 2. Boot ROM fallback and enumeration timing
 
@@ -91,10 +94,11 @@ already supports an 8-byte EP0 (the low-speed path uses it):
    already uses to suppress the qualifier and LPM), honour the configfs
    `bcdUSB` (1.10) instead of forcing 2.00.
 
-About 20 lines, untested like 0004.  Trade-off: an 8-byte EP0 makes
-enumeration take eight times as many control packets, exactly as a USB 1.1
-keyboard does; no functional impact.  We can add this as patch 0005 on
-request; it only matters when cloning a USB 1.1 reference.
+About 20 lines, untested like 0004 and 0005.  Trade-off: an 8-byte EP0
+makes enumeration take eight times as many control packets, exactly as a
+USB 1.1 keyboard does; no functional impact.  We can add this as patch 0006
+on request (0005 has since been used for the standard-request answers); it
+only matters when cloning a USB 1.1 reference.
 
 ### 4. Interface topology and endpoints
 
@@ -138,7 +142,7 @@ no gadget `.wakeup` operation; 0004 adds it.
 ### 6. ConfigFS / f_hid "state quirks"
 
 **Claim, checked.** For an invalid string index libcomposite's `get_string`
-returns `-EINVAL` (`composite.c:1316`, via `usbstring.c:54`), `composite_setup`
+returns `-EINVAL` (`composite.c:1367`, via `usbstring.c:55`), `composite_setup`
 returns the negative value (`composite.c:2308-2309`) and dwc2 stalls EP0
 (`gadget.c:2000-2001`, `dwc2_hsotg_stall_ep0`).  Unknown requests take the
 same path from the `-EOPNOTSUPP` default (`composite.c:1782`).  That is the
@@ -149,9 +153,12 @@ majority of keyboard firmware does.
 garbage responses, is (a) contrary to the project goal of a *generic,
 compliant* keyboard, (b) not achievable without first fuzzing the physical
 reference device with an analyser to learn its quirks, and (c) misdescribed:
-raw-gadget is a user-space interface (`/dev/raw-gadget`), not a custom kernel
-driver.  Device fingerprinting from enumeration behaviour and timing exists
-in the research literature, but it needs a per-model baseline; no host
+raw_gadget is a small kernel module that hands every SETUP packet to a
+user-space program through `/dev/raw-gadget`, so "a custom kernel driver
+using raw-gadget" is a contradiction, and even that program cannot change
+the handshake and malformed-packet behaviour the dwc2 controller produces.
+Device fingerprinting from enumeration behaviour and timing exists
+in the research literature, but it needs a per-model baseline; we know of no host
 software does this.  Not recommended.
 
 ### 7. DWC2 controller fingerprinting and the MCU proxy
@@ -191,7 +198,7 @@ patches is complete.
 It polls the interrupt IN endpoint at `bInterval` and receives whatever
 report is waiting: `f_hid.c` fixes that at 10 ms for full speed
 (`hidg_fs_in_ep_desc.bInterval = 10`, lines 263/275) and 1 ms at high speed
-(`bInterval = 4`, lines 160/181), and it keeps exactly one request in flight
+(`bInterval = 4`, lines 222/234), and it keeps exactly one request in flight
 (`write_pending`).  Every observation the host can make is therefore
 quantized to the polling interval.  Sub-millisecond scheduler or garbage
 collection jitter disappears at 10 ms quantization and shifts at most one
@@ -248,6 +255,9 @@ could be added for the rel→abs mode if someone uses it.
 
 * `815bc38` latest-state report model (item 9); identity tool topology
   warnings (item 4); doc corrections (items 1 and 2).
+* `7b0c67e` (after the independent verification below): suspend backoff and
+  transition FIFOs, reworked patches 0001–0004, new 0005, `GET_REPORT` cache
+  priming at `gadget up`, identity tool `--config`, doc corrections.
 * This document.
 
 ## Independent verification (added after the analysis above)
@@ -318,17 +328,16 @@ followed by an empty packet on the next IN token.  No real HID device does
 that, an analyser sees it on every keystroke, and it halves the achievable
 report rate (one report per two polls).  Fixed in `kernel-patches/0001`.
 
-Corrections to the earlier text of this document: the invalid-string-index
-return is `composite.c:1367` (via `usbstring.c:55`), not 1316; the
-high-speed `bInterval` constants are `f_hid.c:222/234`, not 160/181;
-`raw_gadget` is itself a small kernel module that forwards every SETUP to
-user space, so "a custom kernel driver using raw-gadget" is a contradiction
-rather than merely imprecise; and "what most firmware does" and "no host
-software does this" are general knowledge, not verifiable from the sources.
+The verifiers also corrected three citations and one characterisation in
+the earlier text, applied in place above.  "What most firmware does" and
+"we know of no host software that does this" (item 6) are general
+knowledge, not verifiable from the sources.
 
 ## Offered follow-ups
 
-* Kernel patch 0005 (bcdUSB 1.10 and 8-byte EP0 at full speed) for cloning
+None of these has been started.
+
+* Kernel patch 0006 (bcdUSB 1.10 and 8-byte EP0 at full speed) for cloning
   USB 1.1 references (item 3).
 * A clone mode for report descriptors and extra interfaces (item 4).
 * An RP2040 USB front-end with a serial sink in the bridge (item 7), the

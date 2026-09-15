@@ -120,7 +120,8 @@ def cmd_check(args, cfg) -> int:
     print("kernel-fixed on a stock kernel: bcdUSB 0x0200 (0x0201 + BOS when the controller enables LPM), "
           "bMaxPacketSize0 64, bcdHID 1.01, bInterval 10 ms at full speed / 1 ms at high speed")
     print("with kernel-patches/ installed: bcdHID 1.10, bcdUSB 0x0200 without BOS at full speed, GET_IDLE 0, "
-          "report-type checks, remote wakeup; bMaxPacketSize0 and bInterval unchanged")
+          "no interface string, no ZLP after reports, report-type checks, remote wakeup, real-device answers to "
+          "GET_STATUS/SET_FEATURE; bMaxPacketSize0 and bInterval unchanged")
 
     kbd = keyboard_report_descriptor(cfg.keyboard.descriptor == "extended")
     in_bits, out_bits = report_bit_sizes(kbd)

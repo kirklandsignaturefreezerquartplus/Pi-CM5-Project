@@ -25,6 +25,7 @@ find "$PREFIX/hid_bridge" -name '__pycache__' -type d -prune -exec rm -rf {} +
 cp "$SRC_DIR/README.md" "$PREFIX/README.md"
 rm -rf "$PREFIX/docs"; cp -r "$SRC_DIR/docs" "$PREFIX/docs"
 rm -rf "$PREFIX/tools"; cp -r "$SRC_DIR/tools" "$PREFIX/tools"
+rm -rf "$PREFIX/kernel-patches"; cp -r "$SRC_DIR/kernel-patches" "$PREFIX/kernel-patches"
 install -m 0755 "$SRC_DIR/bin/hid-bridge" /usr/local/bin/hid-bridge
 
 echo "==> configuration"

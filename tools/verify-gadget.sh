@@ -33,7 +33,9 @@ if [ -n "$UDC" ]; then
     done
     printf '  %-18s %s\n' "lpm (debugfs)" "$(grep -E '^\s*lpm\s*[:=]' /sys/kernel/debug/usb/$UDC/params 2>/dev/null | awk '{print $NF}' || echo n/a)"
     echo "  (state should be 'configured' and current_speed 'full-speed' while the target is on;"
-    echo "   lpm 1 means the host sees bcdUSB 2.01 plus a BOS descriptor, lpm 0 means bcdUSB 2.00)"
+    printf '  %-18s %s\n' "suspended" "$(cat "/sys/class/udc/$UDC/gadget/suspended" 2>/dev/null || echo n/a)"
+    echo "   lpm 1 means bcdUSB 2.01 plus a BOS descriptor on a stock kernel; with kernel-patches/0002"
+    echo "   at full speed the wire is always 2.00 without BOS; suspended 1 = the host suspended the bus)"
 else
     echo "== UDC: not bound"
 fi

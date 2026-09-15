@@ -1,6 +1,6 @@
 # Remaining deep-inspection tells and recommended solves
 
-Status after the software work and `kernel-patches/0001`–`0004`: nothing on the
+Status after the software work and `kernel-patches/0001`–`0005`: nothing on the
 USB bus identifies the device as Linux, a gadget, or a Raspberry Pi.  What is
 left is either an operator decision, a hardware measurement, or a timing
 observation.  For each: what an inspector sees, the recommended solve, and

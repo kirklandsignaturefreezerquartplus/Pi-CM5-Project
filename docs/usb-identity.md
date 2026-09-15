@@ -38,11 +38,11 @@ checked against the Raspberry Pi `rpi-6.12.y` kernel sources.
 
 | Field | Typical real keyboard | What the CM5 reports | Where |
 |---|---|---|---|
-| bcdUSB | 0x0110 or 0x0200 | 0x0200; 0x0201 plus a BOS descriptor with a USB 2.0 Extension (LPM) capability if the dwc2 core has LPM enabled | `composite.c` recomputes it from the gadget's capabilities; `dwc2` sets `lpm_capable` from the hardware's `lpm_mode` |
+| bcdUSB | 0x0110 or 0x0200 | 0x0200; 0x0201 plus a BOS descriptor with a USB 2.0 Extension (LPM) capability if the dwc2 core has LPM enabled | `composite.c` recomputes it from the gadget's capabilities; `dwc2` sets `lpm_capable` from the hardware's `lpm_mode`; `kernel-patches/0002` keeps 0x0200 without BOS at full speed |
 | bMaxPacketSize0 | 8 or 64 | 64 | `composite.c` copies dwc2's EP0 size (`EP0_MPS_LIMIT`) |
 | bcdHID | 0x0110 | 0x0101 | constant in `usb_f_hid` |
 | bInterval | 8–10 ms (FS) | 10 ms at full speed, 1 ms at high speed | constants in `usb_f_hid`; the `poll_interval_ms` options only take effect on kernels that add an `interval` attribute |
-| DEVICE_QUALIFIER / OTHER_SPEED_CONFIGURATION at full speed | STALL (FS-only device) | answered (qualifier says high-speed capable) | `gadget->max_speed` stays HIGH because dwc2 does not read a DT `maximum-speed`; only `params.speed` is lowered |
+| DEVICE_QUALIFIER / OTHER_SPEED_CONFIGURATION at full speed | STALL (FS-only device) | answered (qualifier says high-speed capable) | `gadget->max_speed` stays HIGH because dwc2 does not read a DT `maximum-speed`; only `params.speed` is lowered; STALLed with `kernel-patches/0002` |
 | Remote wakeup | bit advertised and functional | bit advertised, **not functional** on a stock kernel | dwc2's gadget ops have no `.wakeup` and `usb_f_hid` has no `wakeup_on_write` in 6.12; `kernel-patches/0004` adds both |
 | iInterface | 0 | string index pointing at "HID Interface" | constant in `usb_f_hid`; `kernel-patches/0001` |
 | `GET_STATUS(Device)` in the Address state | bus-powered | self-powered | `composite_bind` sets it at bind; `kernel-patches/0005` |
