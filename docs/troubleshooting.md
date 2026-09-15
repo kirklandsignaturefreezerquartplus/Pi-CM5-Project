@@ -36,36 +36,55 @@ journalctl -u hid-gadget -u hid-bridge -b
 
 ## Keys arrive on the CM5 console instead of the PC
 
-The source is not grabbed (`grab_inputs = false` or the grab failed).  Look
+The source is not grabbed (`grab_inputs = false`, the matching `[[inputs]]`
+rule sets `grab = false`, or the grab failed; `hid-bridge ctl inputs` shows
+`grabbed` per source).  Look
 for "cannot grab" in the journal; another process (e.g. a desktop session)
 holds the device.  Run Raspberry Pi OS **Lite** on the CM5 and keep
 `grab_inputs = true`.
 
 ## Nothing typed on the PC, bridge says host_connected: false
 
-`hid-bridge ctl status` → `keyboard.host_connected: false` means writes fail
-with ESHUTDOWN: the PC has not configured the device.  See the UDC section
-above.  Reports are dropped, not queued, until it does.
+`hid-bridge ctl status` → `keyboard.host_connected: false` means the last
+write or read failed because the PC has not configured, or has
+de-configured, the device (journal: `host not connected (...)`, `host
+de-configured the interface; waiting for it to come back`).  See the UDC
+section above.  Up to 16 key/button state changes are kept and sent when the
+PC configures the device again (`host configured the interface again`,
+`host connected again`); mouse motion is discarded; `dropped` counts the
+failed attempts.  A flaky cable produces exactly this sequence of lines.
 
 ## `deferred` keeps rising, or `backing_off: true`, in `hid-bridge ctl status`
 
 `deferred` counts writes that had to wait for the host's next poll; a fast
 mouse stream makes it rise normally.  `backing_off: true` means the host has
-suspended the bus (PC asleep, or the OS selectively suspended the keyboard):
-dwc2 refuses reports until the host resumes, so the bridge retries with a
-growing delay and keeps the current key state for the resume.  A key press
-only wakes the PC with `kernel-patches/0004` installed; wake it by other
-means otherwise.  Motion made while the PC sleeps is discarded, as a real
-mouse's would be.
+suspended the bus (PC asleep, or the OS selectively suspended the keyboard)
+and something was typed meanwhile: dwc2 refuses reports until the host
+resumes, so the bridge retries after 50 ms, doubling up to 1 s (journal:
+`host is not accepting reports (bus suspended?); retrying with backoff`,
+then `host accepting reports again`), and waits 250 ms at a time without
+trying while `udc.suspended` in `ctl status` reads 1.  Key state is kept for
+the resume; motion made while the PC sleeps is discarded, as a real mouse's
+would be.  A key press only wakes the PC with `kernel-patches/0004`
+installed and `remote_wakeup = true`; wake it by other means otherwise.
+`get_report_cache: false` (journal: `kernel lacks the f_hid GET_REPORT cache
+ioctl`) means the kernel is older than 6.10 and answers `GET_REPORT` itself
+after 2.5 s with zeros.
 
 ## A key seems stuck on the PC
+
+First see who holds it: `hid-bridge ctl inputs` lists `keys_held` per source
+as HID usage IDs (4 = A, 5 = B, ... 0xE0–0xE7 modifiers).  Then
 
 ```sh
 hid-bridge ctl release-all
 ```
 
-Then check which source held it: `hid-bridge ctl inputs` lists `keys_held`
-per source.  Unplugging a source always releases its keys.
+which clears every source's and macro's held keys and buttons.  Unplugging a
+source always releases its keys.  A journal line `events dropped by the
+kernel; state resynchronised (N keys held)` means the evdev buffer of that
+device overflowed and the bridge rebuilt its held keys from the kernel;
+harmless unless it repeats (the CM5 is starved of CPU).
 
 ## Mouse jumps or moves wrong in relative mode with PiKVM absolute pointer
 
@@ -84,8 +103,10 @@ and re-plug the PC side so it re-enumerates.
 Almost always cabling/port or a half-created gadget.  `sudo systemctl restart
 hid-gadget hid-bridge`, replug, check `dmesg` on the CM5 for dwc2 errors.
 (A manual `gadget down && gadget up` under a running bridge is tolerated:
-the bridge notices the recreated `/dev/hidg*` nodes within a second and
-reopens them.)
+the bridge notices the recreated `/dev/hidg*` nodes within one
+`rescan_interval_ms` and reopens them, journal: `was recreated; reopening`.
+Note that `hid-bridge gadget up` on an already bound gadget changes nothing;
+descriptor changes need `gadget down` first, which the service restart does.)
 
 ## "UDC ... is busy"
 
@@ -101,7 +122,18 @@ entries for `g_*` modules.
 * `ls /dev/input/` should have new `event*` nodes when it is plugged in; if
   not, check `dmesg` for hid errors.
 * Devices that expose neither ordinary keys nor a pointer (PiKVM's serial or
-  Ethernet functions, for instance) are listed as ignored by design.
+  Ethernet functions, for instance) are listed as ignored by design: a
+  keyboard is any device with a key code below 0x100, a mouse any device
+  with a left button or touch and an X axis.  `hid-bridge ctl inputs` shows
+  the reason per ignored node; a node that cannot be opened is retried every
+  5 s, and a node whose device changed (udev reuse) is re-evaluated.
+
+## "cannot reach hid-bridge at /run/hid-bridge/ctl.sock"
+
+The bridge is not running, `bridge.control_socket` was changed or emptied
+(empty disables the socket), or the caller is not root (the socket is mode
+0660, root).  `journalctl -u hid-bridge` shows `control socket unavailable`
+if it could not be created at start-up.
 
 ## Latency
 

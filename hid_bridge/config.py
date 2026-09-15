@@ -230,8 +230,11 @@ def validate(cfg: Config) -> None:
         raise ConfigError("bridge.macro_jitter_ms must be >= 0")
     if cfg.bridge.log_level.upper() not in ("DEBUG", "INFO", "WARNING", "ERROR"):
         raise ConfigError("bridge.log_level must be debug, info, warning or error")
+    from .keymap import KEY_CODES
     for rule in cfg.inputs:
         for key, macro in rule.bindings.items():
+            if key not in KEY_CODES:
+                raise ConfigError(f"binding {key}: unknown evdev key name (see hid_bridge/keymap.py)")
             if macro not in cfg.macros:
                 raise ConfigError(f"binding {key} -> {macro!r}: no such macro")
     # Validate macro step syntax early so a typo fails at start-up, not mid-run.

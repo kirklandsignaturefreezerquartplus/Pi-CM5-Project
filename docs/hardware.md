@@ -50,7 +50,9 @@ Two things to check on your specific carrier before connecting link C:
    circuitry) tolerate it; simple carriers may not.  If in doubt, use a
    "data-only"/"power-blocker" USB-C adapter or a cable with the VBUS line
    opened.  Note that dwc2 does not require VBUS sensing to enumerate on the
-   Pi 5 family, and the kernel is told the device is bus-powered regardless.
+   Pi 5 family; with the default `self_powered = false` the configuration
+   descriptor declares a bus-powered device drawing `max_power_ma` (100 mA,
+   configurable 1–500).
 2. **rpiboot straps.**  On the CM5 IO Board the USB-C jack doubles as the
    rpiboot/eMMC-flashing port.  Leave the "nRPIBOOT"/USB-boot jumper in its
    normal position, otherwise the module enumerates as a BCM boot device
@@ -59,8 +61,10 @@ Two things to check on your specific carrier before connecting link C:
 If the PC is powered off, USB ports on many motherboards still supply 5 V and
 keep the port idle rather than resetting it.  To the CM5 that looks like a
 bus *suspend*, not a disconnect: `hid-bridge ctl status` shows
-`backing_off: true` and reports wait for the PC to come back.  A port that
-drops or resets shows `host_connected: false` instead.  Both are harmless.
+`udc.suspended: 1` (and `backing_off: true` once something has been typed);
+key state waits for the PC to come back, mouse motion is discarded.  A port
+that drops or resets shows `host_connected: false` instead.  Both are
+harmless.
 
 ## PiKVM side
 

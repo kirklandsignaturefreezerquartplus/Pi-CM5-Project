@@ -39,7 +39,9 @@ remote_wakeup = true      # bmAttributes bit 5, as real keyboards advertise. A k
                           # sleeping PC with kernel-patches/0004 installed (stock dwc2 cannot signal
                           # remote wakeup). With false, a stock dwc2 still ACKs SET_FEATURE(REMOTE_WAKEUP);
                           # kernel-patches/0005 makes it STALL like a real device without the bit.
-max_power_ma = 100        # MaxPower
+                          # true also enables f_hid wakeup_on_write on both interfaces when the
+                          # kernel has it (0004), so keys and mouse activity wake the host.
+max_power_ma = 100        # MaxPower, 1-500
 
 # Force a specific UDC name (see /sys/class/udc); empty = the first one found.
 udc = ""
@@ -49,7 +51,7 @@ udc = ""
 # "extended" = same report format, key array widened to 0x00-0xFF so F13-F24 and
 #              international keys are deliverable.  Both are boot-protocol compatible.
 descriptor = "boot"
-poll_interval_ms = 10     # bInterval; Raspberry Pi kernels up to 6.12 have no f_hid 'interval'
+poll_interval_ms = 10     # bInterval, 1-255; Raspberry Pi kernels up to 6.12 have no f_hid 'interval'
                           # attribute and fix it at 10 ms (full speed) / 1 ms (high speed)
 
 [mouse]
@@ -63,18 +65,19 @@ poll_interval_ms = 2      # same caveat as keyboard.poll_interval_ms
 # Absolute source -> relative output: the source range is mapped onto this
 # virtual screen size to produce pixel deltas.
 abs_to_rel_resolution = [1920, 1080]
-# Relative source -> absolute output: absolute units (0..32767) per count.
+# Relative source -> absolute output: absolute units (0..32767) per count (positive number).
 rel_to_abs_gain = 17.0
 
 [bridge]
 grab_inputs = true        # EVIOCGRAB every source so the CM5's own console never sees the keys
-rescan_interval_ms = 1000 # hot-plug detection period
+rescan_interval_ms = 1000 # hot-plug detection and host-state polling period
 tap_ms = 30               # key/button hold time for macro taps and typing
-step_ms = 20              # pause between macro steps
-macro_jitter_ms = 30      # add 0..N ms of right-skewed random jitter to macro taps/gaps so typed
-                          # macros do not have a perfectly regular, machine-like cadence (0 = off)
+step_ms = 20              # pause between macro steps, typed characters and repeated clicks
+macro_jitter_ms = 30      # add 0..N ms of triangular (mode ~0.3 N) jitter to every macro hold, gap
+                          # and modifier lead/lag so typed macros do not have a machine-like cadence
+                          # (0 = off, must be >= 0)
 forward_leds = true       # send Caps/Num/Scroll Lock state from the target back to the sources
-control_socket = "/run/hid-bridge/ctl.sock"
+control_socket = "/run/hid-bridge/ctl.sock"   # "" disables the control socket
 log_level = "info"        # debug | info | warning | error
 
 # ---------------------------------------------------------------------------
@@ -84,6 +87,7 @@ log_level = "info"        # debug | info | warning | error
 #   phys    regex against the physical USB path   (e.g. "usb-xhci-hcd\\.0-1/")
 #   vendor / product   USB IDs
 # role: passthrough | macro | ignore
+# label: free text shown in logs and status;  grab: true|false overrides bridge.grab_inputs
 #
 # Example: a macro keypad whose keys launch macros instead of being forwarded.
 # [[inputs]]
@@ -103,7 +107,7 @@ log_level = "info"        # debug | info | warning | error
 # role = "ignore"
 
 # ---------------------------------------------------------------------------
-# Macros: name = [steps].  See docs/macros.md for the step language.
+# Macros: name = [steps] (or a single step string).  See docs/macros.md for the step language.
 [macros]
 ctrl_alt_del = ["ctrl+alt+delete"]
 win_lock = ["win+l"]

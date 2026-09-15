@@ -52,6 +52,7 @@ class ConfigTests(unittest.TestCase):
             {"inputs": [{"role": "sometimes"}]},
             {"inputs": [{"name": "("}]},
             {"inputs": [{"bindings": {"KEY_1": "missing"}}]},
+            {"inputs": [{"bindings": {"KEY_KP_0": "m"}}], "macros": {"m": ["a"]}},
             {"macros": {"bad": ["wait x"]}},
             {"macros": {"bad": 5}},
             {"bridge": {"log_level": "loud"}},
