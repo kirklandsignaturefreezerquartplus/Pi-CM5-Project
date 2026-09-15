@@ -20,7 +20,7 @@ echo "  interfaces (link order = interface number):"
 ls -1 "$G/configs/c.1" | grep -v '^strings$' | grep -v '^bmAttributes$' | grep -v '^MaxPower$' | sed 's/^/    /'
 for f in "$G"/functions/*; do
     echo "== function $(basename "$f")"
-    for a in protocol subclass report_length no_out_endpoint wakeup_on_write interval dev; do
+    for a in protocol subclass report_length no_out_endpoint strict_report_types wakeup_on_write interval dev; do
         printf '  %-18s %s\n' "$a" "$(cat "$f/$a" 2>/dev/null || echo n/a)"
     done
     printf '  %-18s %s\n' "report_desc" "$(xxd -p "$f/report_desc" 2>/dev/null | tr -d '\n' || od -An -tx1 "$f/report_desc" | tr -d ' \n')"

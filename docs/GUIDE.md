@@ -57,7 +57,7 @@ and mouse, or bound to macros.
 | **Gadget** | Linux's name for a computer acting as a USB device. |
 | **HID** | Human Interface Device: the USB class for keyboards and mice. |
 | **evdev** | The Linux interface the CM5 uses to read keyboards and mice plugged into its host ports. |
-| **Boot protocol** | The simplest keyboard/mouse report format, understood by every BIOS/UEFI. The bridge always speaks it. |
+| **Boot protocol** | The simplest keyboard/mouse report format, understood by every BIOS/UEFI. The keyboard always speaks it; the mouse does with `mouse.mode = "relative"` (the default). |
 | **Relative / absolute mouse** | A normal mouse sends *movements* (relative). PiKVM by default sends *positions* (absolute), like a drawing tablet. The bridge can output either and converts between them. |
 | **PiKVM switch / port N** | The multiport extender attached to the PiKVM, and the port on it whose target gets the CM5. |
 
@@ -222,7 +222,9 @@ uname -r
 ```
 
 Expected: `6.6.x` or `6.12.x` with `-v8-16k` or similar.  Anything 6.1 or
-newer works; the notes in `docs/usb-identity.md` are written against 6.12.
+newer runs; 6.10 or newer is needed for instant `GET_REPORT` answers (older
+kernels answer after 2.5 s with zeros).  The notes in `docs/usb-identity.md`
+are written against 6.12.
 
 Reboot once more so you are on the updated kernel:
 
@@ -260,7 +262,7 @@ Expected, after a second or two:
 ```
 ..........................................................................
 ----------------------------------------------------------------------
-Ran 101 tests in 0.1s
+Ran 102 tests in 0.1s
 
 OK
 ```
@@ -280,14 +282,16 @@ What it does, and what you should see it print:
 2. Writes `/etc/hid-bridge/config.toml` and fills in a random serial number
    (`wrote /etc/hid-bridge/config.toml (serial XXXXXXXXXXXX)`).
 3. Tells the kernel to load the two modules it needs at boot.
-4. Adds one line to `/boot/firmware/config.txt`:
-   `dtoverlay=dwc2,dr_mode=peripheral`.  This switches the USB-C connector
-   into device mode.  A backup of the file is kept next to it.
+4. Appends an `[all]` section containing `dtoverlay=dwc2,dr_mode=peripheral`
+   (with a comment) to `/boot/firmware/config.txt`.  This switches the USB-C
+   connector into device mode.  A backup of the file is kept next to it.
 5. Installs and enables two services: `hid-gadget` (creates the virtual
    keyboard/mouse at boot) and `hid-bridge` (forwards input).
-6. Runs `hid-bridge check` and prints the descriptors.  Two `note:` lines
-   about the test vendor ID and about strings are normal at this stage.
-7. Ends with `Reboot to activate USB device mode:  sudo reboot`.
+6. Runs `hid-bridge check` and prints the descriptors.  One `note:` line
+   about the pid.codes test vendor ID is normal at this stage.
+7. Prints `Reboot to activate USB device mode:  sudo reboot` (or `Start now
+   with: …` when the boot config already had the overlay), followed by a
+   `Then check:` line.
 
 Do that:
 
@@ -310,6 +314,7 @@ Expected (abridged):
   "gadget": "/sys/kernel/config/usb_gadget/hidbridge",
   "exists": true,
   "bound": true,
+  "patched_kernel": false,
   "descriptor": { "idVendor": "0x1209", "idProduct": "0x0001", ... },
   "functions": {
     "keyboard": { "protocol": "1", "subclass": "1", "report_length": "8", ... },
@@ -371,8 +376,9 @@ Watch the bridge take it over:
 journalctl -u hid-bridge -n 5
 ```
 
-Expected: a line like `attached /dev/input/event0: 'Dell KB216 ...' kbd=True
-mouse=False ... role=passthrough (default passthrough) grabbed`.
+Expected: a line like `attached /dev/input/event0: 'Dell KB216 Wired Keyboard'
+[413c:2113] kbd=True mouse=False abs=False role=passthrough (default
+passthrough) grabbed`.
 
 ### 5.2 Connect the target
 
@@ -406,8 +412,11 @@ Check the counters:
 hid-bridge ctl status
 ```
 
-Expected: `"keyboard": {"sent": <some number>, "dropped": 0, "host_connected": true}`,
-your keyboard listed under `"sources"`, and `"leds": 2` while Caps Lock is on.
+Expected, inside `"result"`: `"keyboard": {"device": "/dev/hidg0", "sent": <n>,
+"deferred": <n>, "dropped": 0, "host_connected": true, "backing_off": false,
+"get_report_cache": true}`, your keyboard listed under `"sources"`, and
+`"leds": 2` while Caps Lock is on.  A non-zero `deferred` is normal: it
+counts reports that waited for the host's next poll.
 
 If the keyboard types on the target, the software path is proven.  Unplug the
 spare keyboard.  Leave the target connected.
@@ -537,7 +546,7 @@ What to compare:
 | Field | Expected |
 |---|---|
 | Speed | Full-speed (12 Mb/s) |
-| bcdUSB | 2.00 (or 2.01 with a BOS descriptor if `lpm (debugfs)` shows 1 on the CM5) |
+| bcdUSB | 2.00 (or 2.01 with a BOS descriptor if `lpm (debugfs)` shows 1 on the CM5; always 2.00 without BOS once `kernel-patches/0002` is installed) |
 | bDeviceClass/SubClass/Protocol | 0 / 0 / 0 |
 | idVendor / idProduct | as in `[gadget]` (0x1209 / 0x0001 until you change them) |
 | Configuration bmAttributes / MaxPower | 0xA0 / 100 mA |
@@ -609,6 +618,15 @@ and avoid brands whose software is installed on the target.
 | `mouse.mode` | `relative` | You want PiKVM's absolute pointer end-to-end (`absolute`) |
 | `mouse.buttons` | `3` | You use back/forward mouse buttons through PiKVM (`5`) |
 | `mouse.abs_to_rel_resolution` | `[1920, 1080]` | Converting absolute to relative and the target's desktop is a different size |
+| `mouse.rel_to_abs_gain` | `17.0` | A relative mouse drives an `absolute` output and moves too fast or too slow |
+| `bridge.macro_jitter_ms` | `30` | Macro cadence should be more or less random (`0` = fixed timing) |
+| `bridge.log_level` | `info` | You want `debug` detail in the journal |
+| `[[inputs]].grab` | inherits `bridge.grab_inputs` | One device must stay usable on the CM5 itself while still being read |
+
+Rarely changed: `gadget.self_powered` (false), `gadget.max_power_ma` (100),
+`gadget.udc` (auto), `gadget.name` (configfs directory), and the two
+`poll_interval_ms` values, which only take effect on kernels whose HID
+function has an `interval` attribute (rpi-6.12.y does not).
 
 ### 8.4 Excluding a device
 
@@ -662,9 +680,10 @@ sudo cp arch/arm64/boot/dts/overlays/*.dtb* /boot/firmware/overlays/
 sudo reboot
 ```
 
-Afterwards `hid-bridge check` reports `kernel-patches/ present: yes`, no
-longer lists `strict_report_types` or `wakeup_on_write` as missing, and
-`tools/verify-gadget.sh` shows them set to 1.  The remote-wakeup operation
+Afterwards `hid-bridge check` reports `kernel-patches/ present: yes
+(strict_report_types attribute found)`, no longer lists `strict_report_types`
+or `wakeup_on_write` as missing, and `tools/verify-gadget.sh` shows both set
+to 1.  The remote-wakeup operation
 can be exercised without a key press: `echo 1 | sudo tee
 /sys/class/udc/*/srp` while the target sleeps.  Hold the kernel package so an update does not replace it:
 
@@ -677,7 +696,8 @@ If the CM5 fails to boot on the new kernel, put the SD/eMMC into another
 machine (or use rpiboot) and rename `kernel_2712-stock.img` back to
 `kernel_2712.img`.
 
-Patch 0004 (remote wakeup) has not yet been exercised on hardware.  Test it
+Patches 0004 (remote wakeup) and 0005 (standard-request answers) have not
+yet been exercised on hardware.  Test 0004
 after installing: sleep the target (S3), enable *Allow this device to wake the
 computer* under Device Manager → HID Keyboard Device → Power Management, press
 a key via PiKVM.  If the target does not wake, set `remote_wakeup = false` in
@@ -735,14 +755,15 @@ login        = ["ctrl+alt+delete", "wait 1200", "type MyPassword", "enter"]
 ```
 
 `hid-bridge check` reports any typo; restart the bridge to load them.
-Consider `macro_jitter_ms = 40` under `[bridge]` so typed macros do not have a
-perfectly regular rhythm.
+Macro taps and gaps already get up to 30 ms of random jitter
+(`macro_jitter_ms = 30` under `[bridge]`) so typed macros do not have a
+perfectly regular rhythm; raise it, or set 0 to turn it off.
 
 ### 10.3 A macro keypad
 
 1. Plug the keypad into a spare USB-A port on the CM5.
 2. `hid-bridge inputs` shows it, for example
-   `Macro Pad  1a2c:2d43  keyboard  passthrough`.  Right now its keys would
+   `Macro Pad  1a2c:2d43  keyboard  passthrough [default passthrough]`.  Right now its keys would
    be forwarded as ordinary key presses.
 3. Find out which key is which: `journalctl -u hid-bridge -f` while pressing
    keys shows nothing by default; instead run `sudo evtest
@@ -861,7 +882,8 @@ sudo ./uninstall.sh --purge                 # remove everything; reboot returns 
 | `"state"` never becomes `configured` | Cable in a USB-A port instead of USB-C; power blocker or cable faulty; try another target port |
 | Windows: "Unknown USB Device (Device Descriptor Request Failed)" | Cable/port; `sudo systemctl restart hid-gadget hid-bridge`, replug |
 | Typing works from PiKVM but keys arrive on the CM5's console | Device not grabbed; you are running a desktop session, or `grab_inputs = false`; check the journal for `cannot grab` |
-| `host_connected: false` in `ctl status` | Target off, asleep, or not enumerated; reports are dropped until it returns |
+| `host_connected: false` in `ctl status` | Target off or not enumerated; reports are dropped until it returns |
+| `backing_off: true` in `ctl status`, journal says `host is not accepting reports (bus suspended?)` | Target has suspended the bus (asleep); the bridge retries every 50 ms to 1 s and resumes on its own; motion made while asleep is discarded |
 | A key seems stuck on the target | `hid-bridge ctl release-all`, then look at `keys_held` per source in `ctl inputs` |
 | Mouse jumps or drifts | PiKVM absolute → bridge relative conversion; pick Option 1 or 2 in Part 6.3 |
 | Mouse missing in BIOS setup | `mouse.mode` is `absolute`; switch to `relative` and replug |
@@ -883,7 +905,9 @@ hid-bridge ctl steps STEP...         run ad-hoc macro steps
 hid-bridge ctl macro NAME            run a configured macro
 hid-bridge ctl release-all           release every key and button
 tools/verify-gadget.sh               dump what the CM5 presents on the bus
-tools/identity-from-lsusb.py FILE    build a [gadget] block from a reference device
+tools/identity-from-lsusb.py [--config CFG] FILE   build a [gadget] block from a reference device, warn where the clone would differ
+hid-bridge [-c FILE] [-v] COMMAND    use another config file / debug logging
+hid-bridge run [--auto-gadget]       run the daemon in the foreground (what the service does)
 tools/windows/Get-HidBridgeDevices.ps1   Windows-side view of the device
 sudo systemctl restart hid-bridge    apply [bridge]/[[inputs]]/[macros] changes
 sudo systemctl restart hid-gadget hid-bridge   apply [gadget]/[keyboard]/[mouse] changes (then replug)

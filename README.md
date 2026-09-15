@@ -45,8 +45,9 @@ the KVM as a new game controller.
 Raspberry Pi 6.12 kernel sources, of what is pinned, what the kernel decides,
 what a deep inspection could still notice, and how to verify the enumeration
 from Windows or a Linux host.  `kernel-patches/` (five patches for
-rpi-6.12.y) removes the remaining kernel-side tells: bcdHID 1.01 and the
-Linux interface string, qualifier/LPM answers at full speed, class requests
+rpi-6.12.y) removes the remaining kernel-side tells: bcdHID 1.01, the
+Linux interface string, the 4 ms idle rate and the zero-length packet after
+every report, qualifier/LPM answers at full speed, class requests
 for report types the device does not have, remote wakeup, and the
 self-powered/remote-wakeup/test-mode/interface-status answers of the
 standard requests.
@@ -88,8 +89,8 @@ receive.
 * **keyboard** — `boot` (spec-exact) or `extended` (F13–F24, international keys).
 * **mouse** — `relative` (boot-compatible, works in UEFI) or `absolute`
   (PiKVM's tablet-style pointer; needs an OS); 3 or 5 buttons.
-* **bridge** — grabbing, hot-plug rescan period, macro timing, LED feedback,
-  control socket.
+* **bridge** — grabbing, hot-plug rescan period, macro timing and jitter,
+  LED feedback, control socket, log level.
 * **inputs** — rules matching devices by name/phys/VID/PID with role
   `passthrough`, `macro` or `ignore`; macro devices bind keys to macros.
 * **macros** — named step lists (`docs/macros.md`).
@@ -102,11 +103,13 @@ hid-bridge ctl keys win+l
 hid-bridge ctl type "some text"
 hid-bridge ctl steps "ctrl+alt+delete" "wait 1500" "type hunter2" "enter"
 hid-bridge ctl release-all
+hid-bridge ctl inputs                 # attached sources and ignored devices
 ```
 
 The same commands are available to local scripts over the Unix socket
 `/run/hid-bridge/ctl.sock` as newline-delimited JSON.  Macro keypads are bound
-in `[[inputs]]` rules; their keystrokes never reach the PC directly.
+in `[[inputs]]` rules; bound keys never reach the PC, and unbound keys are
+dropped unless the rule sets `unbound = "passthrough"`.
 
 ## Behaviour details
 
@@ -133,7 +136,8 @@ in `[[inputs]]` rules; their keystrokes never reach the PC directly.
   buttons that were actually held are released.
 * `GET_REPORT(Input)` on the control endpoint is answered instantly with the
   current key/button state, as a real keyboard does, via the kernel's
-  GET_REPORT cache.
+  GET_REPORT cache (kernel 6.10 or newer; older kernels answer after 2.5 s
+  with zeros).
 
 ## Repository layout
 
