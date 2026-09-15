@@ -146,7 +146,7 @@ systemd/             hid-gadget.service (oneshot) and hid-bridge.service
 tools/               verify-gadget.sh (CM5), windows/Get-HidBridgeDevices.ps1 (target)
 kernel-patches/      optional rpi-6.12.y patches removing kernel-side gadget tells
 tools/identity-from-lsusb.py  turn an lsusb -v dump of a reference keyboard into [gadget] settings
-docs/                GUIDE (start here), hardware, usb-identity, remaining-tells, pikvm, macros, troubleshooting
+docs/                GUIDE (start here), hardware, usb-identity, remaining-tells, review-analysis, pikvm, macros, troubleshooting
 tests/               unit tests (python3 -m unittest discover -s tests)
 ```
 
