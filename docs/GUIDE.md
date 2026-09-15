@@ -260,12 +260,12 @@ Expected, after a second or two:
 ```
 ..........................................................................
 ----------------------------------------------------------------------
-Ran 86 tests in 0.1s
+Ran 101 tests in 0.1s
 
 OK
 ```
 
-If anything fails here, stop: the code copy is damaged or Python is too old.
+(The exact count grows as tests are added.)  If anything fails here, stop: the code copy is damaged or Python is too old.
 
 ### 4.3 Install
 

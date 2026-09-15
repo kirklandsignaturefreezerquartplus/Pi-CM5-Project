@@ -182,7 +182,7 @@ isolates its output behind one class (`hid_bridge/hidg.py: HidgDevice`, with
 and an `fd`), so a serial sink is a sibling class plus a config switch, not
 a rewrite.  Cost: a few hundred lines of firmware, a UART link, and losing
 the "pure CM5" simplicity.  This is the recommended path if the remaining
-hardware tells matter; otherwise the current design with the four kernel
+hardware tells matter; otherwise the current design with the five kernel
 patches is complete.
 
 ### 8. Macro jitter and "microsecond timing"
