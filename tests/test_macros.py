@@ -86,7 +86,8 @@ class EngineTests(unittest.TestCase):
         engine, target = self.make({"cad": ["ctrl+alt+delete"]})
         engine.start("cad")
         drain(engine, target)
-        self.assertEqual(target.key_events, [{0xE0, 0xE2, 0x4C}, set()])
+        # modifiers lead the key and follow its release, as fingers do
+        self.assertEqual(target.key_events, [{0xE0, 0xE2}, {0xE0, 0xE2, 0x4C}, {0xE0, 0xE2}, set()])
         self.assertEqual(engine.stats()["completed"], 1)
         self.assertEqual(engine.running, 0)
 
@@ -94,8 +95,9 @@ class EngineTests(unittest.TestCase):
         engine, target = self.make({"t": ["type aB!"]})
         engine.start("t")
         drain(engine, target)
-        presses = [ev for ev in target.key_events if ev]
+        presses = [ev for ev in target.key_events if any(not (0xE0 <= u <= 0xE7) for u in ev)]
         self.assertEqual(presses, [{0x04}, {0xE1, 0x05}, {0xE1, 0x1E}])
+        self.assertIn({0xE1}, target.key_events)   # shift went down in its own report first
 
     def test_timing(self):
         engine, target = self.make({"m": ["a", "wait 500", "b"]}, tap_ms=30, step_ms=20)

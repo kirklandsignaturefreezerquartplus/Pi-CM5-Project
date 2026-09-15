@@ -3,6 +3,8 @@
 
     lsusb -v -d 046d:c534 > reference.txt          # on any Linux machine
     tools/identity-from-lsusb.py reference.txt      # paste output into config.toml
+    tools/identity-from-lsusb.py --config /etc/hid-bridge/config.toml reference.txt
+                                                    # compare against your actual settings
 
 Copies idVendor, idProduct, bcdDevice, manufacturer/product/serial strings
 and the configuration power attributes.  The serial is deliberately
@@ -64,6 +66,27 @@ PRESENTED = {
 }
 
 
+def presented_from_config(cfg) -> dict:
+    """What hid-bridge presents with this configuration (see docs/usb-identity.md)."""
+    from hid_bridge.descriptors import keyboard_report_descriptor, mouse_report_descriptor, mouse_report_length
+    high_speed = cfg.gadget.max_speed == "high-speed"
+    interval = 1 if high_speed else 10
+    relative = cfg.mouse.mode == "relative"
+    return {
+        "bcdUSB": "2.00 (2.01 with LPM on a stock kernel)",
+        "bMaxPacketSize0": 64,
+        "interfaces": [
+            {"class": 3, "subclass": 1, "protocol": 1, "endpoints": 1, "bInterval": interval, "wMaxPacketSize": 8,
+             "bcdHID": "1.01 (1.10 with kernel-patches/0001)",
+             "report_len": len(keyboard_report_descriptor(cfg.keyboard.descriptor == "extended"))},
+            {"class": 3, "subclass": 1 if relative else 0, "protocol": 2 if relative else 0, "endpoints": 1,
+             "bInterval": interval, "wMaxPacketSize": mouse_report_length(cfg.mouse.mode),
+             "bcdHID": "1.01 (1.10 with kernel-patches/0001)",
+             "report_len": len(mouse_report_descriptor(cfg.mouse.mode, cfg.mouse.buttons))},
+        ],
+    }
+
+
 def _interfaces(block: str) -> list[dict]:
     """Parse the Interface Descriptor blocks of an lsusb -v dump."""
     found = []
@@ -87,8 +110,9 @@ def _interfaces(block: str) -> list[dict]:
     return found
 
 
-def topology_warnings(block: str) -> list[str]:
+def topology_warnings(block: str, presented: dict | None = None) -> list[str]:
     """Differences between the reference device and what hid-bridge presents."""
+    PRESENTED = presented or globals()["PRESENTED"]
     warnings = []
     bcd_usb = _field(block, "bcdUSB")
     if bcd_usb and bcd_usb not in ("2.00", "2.01"):
@@ -126,7 +150,7 @@ def topology_warnings(block: str) -> list[str]:
     return warnings
 
 
-def convert(dump: str, rng: random.Random | None = None) -> str:
+def convert(dump: str, rng: random.Random | None = None, presented: dict | None = None) -> str:
     rng = rng or random.Random()
     # Restrict to the first device block.
     parts = re.split(r"^Bus \d+ Device \d+: ID ", dump, flags=re.M)
@@ -166,7 +190,7 @@ def convert(dump: str, rng: random.Random | None = None) -> str:
         notes.append("# reference has no serial; set all three strings or none (see docs/usb-identity.md)")
     if not (manufacturer or product):
         notes.append("# reference has no strings at all: leave manufacturer/product/serial empty")
-    for warning in topology_warnings(block):
+    for warning in topology_warnings(block, presented):
         notes.append(f"# WARNING: {warning}")
     if any(n.startswith("# WARNING") for n in notes):
         notes.append("# A descriptor dump of the clone will differ from the original in the points above;")
@@ -175,11 +199,25 @@ def convert(dump: str, rng: random.Random | None = None) -> str:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 2 or argv[1] in ("-h", "--help"):
+    args = list(argv[1:])
+    presented = None
+    if len(args) >= 2 and args[0] == "--config":
+        import os
+        for candidate in (os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "/opt/hid-bridge"):
+            if os.path.isdir(os.path.join(candidate, "hid_bridge")) and candidate not in sys.path:
+                sys.path.insert(0, candidate)
+        from hid_bridge.config import ConfigError, load_config
+        try:
+            presented = presented_from_config(load_config(args[1]))
+        except ConfigError as exc:
+            print(f"config error: {exc}", file=sys.stderr)
+            return 2
+        args = args[2:]
+    if len(args) != 1 or args[0] in ("-h", "--help"):
         print(__doc__.strip(), file=sys.stderr)
         return 2
-    with open(argv[1], encoding="utf-8", errors="replace") as fh:
-        sys.stdout.write(convert(fh.read()))
+    with open(args[0], encoding="utf-8", errors="replace") as fh:
+        sys.stdout.write(convert(fh.read(), presented=presented))
     return 0
 
 

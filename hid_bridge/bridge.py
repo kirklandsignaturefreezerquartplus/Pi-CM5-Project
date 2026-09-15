@@ -6,6 +6,7 @@ import os
 import select
 import signal
 import time
+from collections import deque
 
 from . import linux_input as li
 from .config import Config, InputRule
@@ -84,17 +85,24 @@ class Bridge:
         b = cfg.bridge
         self.kbd = HidgDevice(devices["keyboard"], KEYBOARD_REPORT_LENGTH, "keyboard")
         self.mouse = HidgDevice(devices["mouse"], mouse_report_length(cfg.mouse.mode), "mouse")
-        # "Device registers": what the host should receive next.  The keyboard
-        # report is recomputed from the merged key state at flush time; mouse
-        # motion accumulates between host polls exactly as a real mouse's
-        # counters do.  Nothing is ever queued or dropped; the latest state wins.
-        self._kbd_dirty = False
+        # "Device registers": what the host should receive next.  Key and
+        # button *transitions* are kept in short FIFOs so a press that is
+        # followed by its release before the host polls is still reported
+        # once (a real keyboard's scan buffer does the same); mouse motion
+        # accumulates between host polls exactly as a real mouse's counters
+        # do and saturates when the host stops collecting.  Nothing blocks.
+        self._kbd_queue: deque[bytes] = deque(maxlen=self.TRANSITION_QUEUE)
+        self._btn_queue: deque[int] = deque(maxlen=self.TRANSITION_QUEUE)
         self._mouse_dirty = False
         self._mouse_dx = 0
         self._mouse_dy = 0
         self._mouse_wheel = 0
-        self._mouse_last_buttons = 0
+        self._mouse_last_buttons: int | None = None   # None: host state unknown, must send
+        self._motion_blocked_since: float | None = None
         self.udc = devices.get("udc", "")
+        suspended_path = f"/sys/class/udc/{self.udc}/gadget/suspended" if self.udc else ""
+        self.kbd.suspended_path = suspended_path
+        self.mouse.suspended_path = suspended_path
         self.sources: dict[int, Source] = {}
         self.by_path: dict[str, Source] = {}
         self.ignored: dict[str, str] = {}
@@ -123,20 +131,42 @@ class Bridge:
             buttons |= src.buttons
         return buttons
 
-    MOTION_LIMIT = 32767  # accumulated counts saturate like a real mouse's counters
+    MOTION_LIMIT = 4095        # overflow guard for the motion accumulators
+    MOTION_SATURATE = 127      # what an 8-bit mouse hands over after the host stopped collecting
+    STALL_GAP = 0.1            # host not collecting for this long: saturate like the real counters
+    TRANSITION_QUEUE = 16      # key/button states kept while the host is not collecting
+
+    @property
+    def _kbd_dirty(self) -> bool:
+        return bool(self._kbd_queue)
 
     def _flush_keyboard(self) -> None:
-        self._kbd_dirty = True
+        report = keyboard_report(self.all_usages(), self.max_usage)
+        tail = self._kbd_queue[-1] if self._kbd_queue else self.kbd.last_report
+        if report != tail:
+            self._kbd_queue.append(report)
         self._pump_keyboard()
 
-    def _pump_keyboard(self) -> None:
-        """Send the current merged keyboard state if the host can take it."""
-        if not self._kbd_dirty:
+    def _pump_keyboard(self, from_pollout: bool = False) -> None:
+        """Deliver queued keyboard states, oldest first, while the host takes them."""
+        now = time.monotonic()
+        while self._kbd_queue:
+            if self.kbd.backoff_until > now:
+                return
+            if self.kbd.write_report(self._kbd_queue[0]):
+                self._kbd_queue.popleft()
+                continue
+            self._on_write_deferred(self.kbd, from_pollout, now)
             return
-        if self.kbd.write_report(keyboard_report(self.all_usages(), self.max_usage)):
-            self._kbd_dirty = False
+
+    def _note_buttons(self) -> None:
+        buttons = self.all_buttons()
+        tail = self._btn_queue[-1] if self._btn_queue else self._mouse_last_buttons
+        if buttons != tail:
+            self._btn_queue.append(buttons)
 
     def _emit_mouse_motion(self, dx: int, dy: int, wheel: int) -> None:
+        self._note_buttons()
         if self.cfg.mouse.mode == "relative":
             self._mouse_dx = clamp(self._mouse_dx + dx, -self.MOTION_LIMIT, self.MOTION_LIMIT)
             self._mouse_dy = clamp(self._mouse_dy + dy, -self.MOTION_LIMIT, self.MOTION_LIMIT)
@@ -149,6 +179,7 @@ class Bridge:
         self._pump_mouse()
 
     def _emit_mouse_absolute(self, x: int | None, y: int | None, wheel: int) -> None:
+        self._note_buttons()
         if x is not None:
             self.abs_pos[0] = x
         if y is not None:
@@ -157,39 +188,106 @@ class Bridge:
         self._mouse_dirty = True
         self._pump_mouse()
 
-    def _pump_mouse(self) -> None:
+    def _motion_pending(self) -> bool:
+        return bool(self._mouse_dx or self._mouse_dy or self._mouse_wheel)
+
+    def _drop_motion(self) -> None:
+        self._mouse_dx = self._mouse_dy = self._mouse_wheel = 0
+        self._motion_blocked_since = None
+
+    def _saturate_motion(self) -> None:
+        lim = self.MOTION_SATURATE
+        self._mouse_dx = clamp(self._mouse_dx, -lim, lim)
+        self._mouse_dy = clamp(self._mouse_dy, -lim, lim)
+        self._mouse_wheel = clamp(self._mouse_wheel, -lim, lim)
+
+    def _on_write_deferred(self, sink: HidgDevice, from_pollout: bool, now: float) -> None:
+        """A write could not be handed to the kernel right now."""
+        if sink.disconnected or sink.host_disabled:
+            if sink is self.mouse:
+                self._drop_motion()      # no host to deliver motion to; buttons kept
+            return
+        if sink is self.mouse and self._motion_pending() and self._motion_blocked_since is None:
+            self._motion_blocked_since = now
+        if from_pollout:
+            # Writable yet refused: the bus is suspended and dwc2 rejects
+            # requests until the host resumes.  Retry with backoff; motion
+            # gathered while asleep is meaningless, as on a real mouse.
+            sink.enter_backoff(now)
+            self._drop_motion()
+
+    def _pump_mouse(self, from_pollout: bool = False) -> None:
         """Send pending mouse state, one report per host poll slot."""
         n = self.cfg.mouse.buttons
-        while self._mouse_dirty:
-            buttons = self.all_buttons()
+        relative = self.cfg.mouse.mode == "relative"
+        now = time.monotonic()
+        while True:
+            if self.mouse.backoff_until > now:
+                return
+            if self.mouse.last_report is None:
+                self._mouse_last_buttons = None          # host re-enumerated: its state is unknown
+            if self._motion_blocked_since is not None and now - self._motion_blocked_since > self.STALL_GAP:
+                self._saturate_motion()
+            if self._btn_queue:
+                buttons = self._btn_queue[0]
+            elif self._mouse_last_buttons is not None:
+                buttons = self._mouse_last_buttons
+            else:
+                buttons = self.all_buttons()
             cw = clamp(self._mouse_wheel, -127, 127)
-            if self.cfg.mouse.mode == "relative":
+            if relative:
                 cx = clamp(self._mouse_dx, -127, 127)
                 cy = clamp(self._mouse_dy, -127, 127)
-                if not (cx or cy or cw) and buttons == self._mouse_last_buttons:
-                    self._mouse_dirty = False
-                    return
+                must_send = bool(self._btn_queue) or bool(cx or cy or cw) or self._mouse_last_buttons is None
                 report = relative_mouse_reports(buttons, cx, cy, cw, n)[0]
                 # GET_REPORT on a relative mouse answers buttons with zero motion.
                 still = relative_mouse_reports(buttons, 0, 0, 0, n)[0]
-                if not self.mouse.write_report(report, force=True, get_report=still):
-                    if self.mouse.disconnected or self.mouse.host_disabled:
-                        # No host to deliver motion to: counters reset, buttons kept.
-                        self._mouse_dx = self._mouse_dy = self._mouse_wheel = 0
-                    return
-                self._mouse_dx -= cx
-                self._mouse_dy -= cy
             else:
+                cx = cy = 0
                 x, y = self.abs_pos
                 report = absolute_mouse_report(buttons, x, y, cw, n)
                 still = absolute_mouse_report(buttons, x, y, 0, n)
-                if not self.mouse.write_report(report, force=bool(cw), get_report=still):
-                    if self.mouse.disconnected or self.mouse.host_disabled:
-                        self._mouse_wheel = 0
-                    return
-            self._mouse_wheel -= cw
+                must_send = bool(self._btn_queue) or bool(cw) or report != self.mouse.last_report
+            if not must_send:
+                self._mouse_dirty = False
+                return
+            if not self.mouse.write_report(report, force=True, get_report=still):
+                self._on_write_deferred(self.mouse, from_pollout, now)
+                return
+            if self._btn_queue:
+                self._btn_queue.popleft()
             self._mouse_last_buttons = buttons
-            self._mouse_dirty = bool(self._mouse_dx or self._mouse_dy or self._mouse_wheel)
+            self._mouse_dx -= cx
+            self._mouse_dy -= cy
+            self._mouse_wheel -= cw
+            self._motion_blocked_since = None
+            self._mouse_dirty = bool(self._btn_queue) or self._motion_pending()
+            if not self._mouse_dirty:
+                return
+
+    def _resync_source(self, src: Source) -> None:
+        """The kernel dropped events for this device: rebuild its state from EVIOCGKEY."""
+        held = src.dev.active_keys()
+        drop = src.role == "macro" and src.rule.unbound == "drop"
+        src.pressed = set()
+        src.buttons = 0
+        if not drop:
+            for code in held:
+                if code in src.bindings:
+                    continue
+                if code >= li.BTN_MOUSE:
+                    bit = BUTTON_BITS.get(code)
+                    if bit is not None:
+                        src.buttons |= 1 << bit
+                else:
+                    usage = EVDEV_TO_HID.get(code)
+                    if usage is not None:
+                        src.pressed.add(usage)
+        src.dx = src.dy = src.wheel = 0
+        src.mouse_dirty = src.abs_dirty = False
+        log.warning("%s: events dropped by the kernel; state resynchronised (%d keys held)", src.dev.name, len(src.pressed))
+        self._flush_keyboard()
+        self._emit_mouse_motion(0, 0, 0)
 
     # ----------------------------------------------------------- MacroTarget
     def macro_keys_changed(self) -> None:
@@ -214,6 +312,15 @@ class Bridge:
         for path in list(self.ignored):
             if path not in present:
                 del self.ignored[path]
+                continue
+            # udev reuses eventN numbers: a different device on the same
+            # path must be re-evaluated, not inherit the old verdict.
+            reason, inode = self.ignored[path]
+            try:
+                if os.stat(path).st_ino != inode:
+                    del self.ignored[path]
+            except OSError:
+                del self.ignored[path]
         for path in list(self.retry_after):
             if path not in present:
                 del self.retry_after[path]
@@ -231,12 +338,12 @@ class Bridge:
             ident = dev.identity
             rule = self.cfg.rule_for(ident.name, ident.phys, ident.vendor, ident.product)
             if rule.role == "ignore":
-                self.ignored[path] = f"rule {rule.describe()}"
+                self.ignored[path] = (f"rule {rule.describe()}", self._inode(path))
                 log.info("%s (%s) ignored by rule %s", path, ident.name, rule.describe())
                 dev.close()
                 continue
             if not (dev.is_keyboard or dev.is_mouse):
-                self.ignored[path] = "not a keyboard or mouse"
+                self.ignored[path] = ("not a keyboard or mouse", self._inode(path))
                 log.debug("%s (%s) is neither keyboard nor mouse; ignored", path, ident.name)
                 dev.close()
                 continue
@@ -255,6 +362,13 @@ class Bridge:
                 path, ident.name, ident.vendor, ident.product, dev.is_keyboard, dev.is_mouse,
                 dev.has_abs_pointer, src.role, rule.describe(), " grabbed" if dev.grabbed else "",
             )
+
+    @staticmethod
+    def _inode(path: str) -> int:
+        try:
+            return os.stat(path).st_ino
+        except OSError:
+            return 0
 
     def _remove_source(self, src: Source, reason: str) -> None:
         log.info("detached %s (%r): %s", src.dev.path, src.dev.name, reason)
@@ -365,6 +479,9 @@ class Bridge:
                     kbd_changed = False
                 if src.mouse_dirty or src.abs_dirty:
                     self._flush_source_mouse(src)
+            elif ev_type == li.EV_SYN and code == li.SYN_DROPPED:
+                self._resync_source(src)
+                kbd_changed = False
         if kbd_changed:
             self._flush_keyboard()
 
@@ -400,7 +517,7 @@ class Bridge:
             return self.status()
         if cmd == "inputs":
             return {"sources": [s.describe() for s in self.sources.values()],
-                    "ignored": dict(self.ignored)}
+                    "ignored": {path: reason for path, (reason, _inode) in self.ignored.items()}}
         if cmd == "macro":
             name = str(request.get("name", ""))
             self.macro.start(name)
@@ -431,6 +548,8 @@ class Bridge:
         raise ValueError(f"unknown command {cmd!r}")
 
     def _poll_host_state(self) -> None:
+        for sink in (self.kbd, self.mouse):
+            sink.revalidate()
         if not self.udc:
             return
         was_away = self.kbd.host_disabled or self.mouse.host_disabled
@@ -439,10 +558,32 @@ class Bridge:
         self.mouse.host_state_changed(state)
         if was_away and state == "configured":
             # Re-sync the host with the current state after it came back.
-            self._kbd_dirty = True
+            self.kbd.last_report = None
+            self.mouse.last_report = None
+            self._flush_keyboard()
             self._mouse_dirty = True
         self._pump_keyboard()
         self._pump_mouse()
+
+    def _service_backoff(self, now: float) -> float | None:
+        """Retry sinks whose backoff expired; return the next wake-up time."""
+        next_wake = None
+        for sink, dirty, pump in ((self.kbd, self._kbd_dirty, self._pump_keyboard),
+                                  (self.mouse, self._mouse_dirty, self._pump_mouse)):
+            if not dirty or not sink.backoff_until:
+                continue
+            if sink.backoff_until > now:
+                next_wake = sink.backoff_until if next_wake is None else min(next_wake, sink.backoff_until)
+                continue
+            if sink.host_suspended():
+                sink.extend_backoff(now)            # still asleep: do not even try
+                next_wake = sink.backoff_until if next_wake is None else min(next_wake, sink.backoff_until)
+                continue
+            sink.backoff_until = 0.0
+            pump()
+            if sink.backoff_until:
+                next_wake = sink.backoff_until if next_wake is None else min(next_wake, sink.backoff_until)
+        return next_wake
 
     def status(self) -> dict:
         return {
@@ -477,8 +618,8 @@ class Bridge:
             except OSError as exc:
                 log.warning("control socket unavailable: %s", exc)
                 self.control = None
-        # Start from a clean slate on the host side.
-        self.kbd.write_report(bytes(KEYBOARD_REPORT_LENGTH))
+        # No unsolicited report at start: a real keyboard sends nothing until
+        # its state changes.  open() has primed the GET_REPORT cache already.
         log.info("bridge running: keyboard=%s mouse=%s (%s, %d buttons), sources rescanned every %d ms",
                  self.kbd.path, self.mouse.path, self.cfg.mouse.mode, self.cfg.mouse.buttons,
                  self.cfg.bridge.rescan_interval_ms)
@@ -496,6 +637,9 @@ class Bridge:
                 deadline = self.macro.next_deadline()
                 if deadline is not None:
                     timeout = min(timeout, deadline - now)
+                wake = self._service_backoff(now)
+                if wake is not None:
+                    timeout = min(timeout, wake - now)
                 timeout = max(0.0, timeout)
                 rlist = list(self.sources) + [self._wake_r]
                 if self.kbd.poll_readable:
@@ -505,9 +649,9 @@ class Bridge:
                 # usb_f_hid reports POLLOUT once the host has collected the
                 # previous report; that is when pending state goes out.
                 wlist = []
-                if self._kbd_dirty and self.kbd.fd >= 0:
+                if self._kbd_dirty and self.kbd.fd >= 0 and not self.kbd.backoff_until:
                     wlist.append(self.kbd.fd)
-                if self._mouse_dirty and self.mouse.fd >= 0:
+                if self._mouse_dirty and self.mouse.fd >= 0 and not self.mouse.backoff_until:
                     wlist.append(self.mouse.fd)
                 try:
                     readable, writable, _ = select.select(rlist, wlist, [], timeout)
@@ -524,9 +668,9 @@ class Bridge:
                     continue
                 for fd in writable:
                     if fd == self.kbd.fd:
-                        self._pump_keyboard()
+                        self._pump_keyboard(from_pollout=True)
                     elif fd == self.mouse.fd:
-                        self._pump_mouse()
+                        self._pump_mouse(from_pollout=True)
                 for fd in readable:
                     if fd == self._wake_r:
                         try:
@@ -543,16 +687,30 @@ class Bridge:
             self.shutdown()
 
     def shutdown(self) -> None:
-        log.info("shutting down: releasing all keys and buttons")
+        held_keys = bool(self.all_usages())
+        held_buttons = bool(self.all_buttons())
+        log.info("shutting down%s", ": releasing held keys/buttons" if held_keys or held_buttons else "")
         self.macro.pressed.clear()
         self.macro.buttons = 0
         for src in list(self.sources.values()):
             src.pressed.clear()
             src.buttons = 0
-        self._mouse_dx = self._mouse_dy = self._mouse_wheel = 0
+        self._drop_motion()
+        self._kbd_queue.clear()
+        self._btn_queue.clear()
+        # A real keyboard sends nothing when nothing changes; only release
+        # what was held, and wait briefly for the host to collect it so a
+        # restart never leaves a key auto-repeating on the target.
         try:
-            self.kbd.write_report(bytes(KEYBOARD_REPORT_LENGTH), force=True)
-            self._emit_mouse_motion(0, 0, 0)
+            if held_keys:
+                self.kbd.write_report_blocking(bytes(KEYBOARD_REPORT_LENGTH), 0.1)
+            if held_buttons:
+                n = self.cfg.mouse.buttons
+                if self.cfg.mouse.mode == "relative":
+                    report = relative_mouse_reports(0, 0, 0, 0, n)[0]
+                else:
+                    report = absolute_mouse_report(0, self.abs_pos[0], self.abs_pos[1], 0, n)
+                self.mouse.write_report_blocking(report, 0.1)
         except Exception as exc:  # noqa: BLE001
             log.debug("final reports not delivered: %s", exc)
         for src in list(self.sources.values()):

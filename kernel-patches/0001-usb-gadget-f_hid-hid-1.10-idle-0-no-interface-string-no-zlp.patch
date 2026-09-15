@@ -1,0 +1,110 @@
+From: hid-bridge project
+Subject: [PATCH 1/5] usb: gadget: f_hid: report HID 1.10, idle rate 0, no interface string, no ZLP after reports
+
+Real HID keyboards report bcdHID 0x0110; the function reported the
+obsolete 1.01.  The default idle rate was 1 (4 ms) although the function
+never re-sends unchanged reports; 0 ("indefinite", report on change only)
+describes the actual behaviour.  The function also attached an interface
+string "HID Interface" to every interface, which real keyboards and mice
+do not have and which identifies the Linux gadget stack by name; leave
+iInterface at 0.
+
+f_hidg_write queued every report with req->zero = 1.  Reports are at most
+wMaxPacketSize, so a full-size report (the normal case: the endpoint size
+is the report length) was followed by a zero-length packet on the next IN
+token.  No real HID device does that, and the ZLP occupied the next poll
+slot, so the function could deliver at most one report every two polls.
+Queue reports without ZLP termination.
+
+---
+diff --git a/drivers/usb/gadget/function/f_hid.c b/drivers/usb/gadget/function/f_hid.c
+index 2f4a5d2..b26ab8c 100644
+--- a/drivers/usb/gadget/function/f_hid.c
++++ b/drivers/usb/gadget/function/f_hid.c
+@@ -142,7 +142,7 @@ static struct usb_interface_descriptor hidg_interface_desc = {
+ static struct hid_descriptor hidg_desc = {
+ 	.bLength			= sizeof hidg_desc,
+ 	.bDescriptorType		= HID_DT_HID,
+-	.bcdHID				= cpu_to_le16(0x0101),
++	.bcdHID				= cpu_to_le16(0x0110),
+ 	.bCountryCode			= 0x00,
+ 	.bNumDescriptors		= 0x1,
+ 	/*.rpt_desc.bDescriptorType	= DYNAMIC */
+@@ -296,22 +296,6 @@ static struct usb_descriptor_header *hidg_fs_descriptors_ssreport[] = {
+ /*-------------------------------------------------------------------------*/
+ /*                                 Strings                                 */
+ 
+-#define CT_FUNC_HID_IDX	0
+-
+-static struct usb_string ct_func_string_defs[] = {
+-	[CT_FUNC_HID_IDX].s	= "HID Interface",
+-	{},			/* end of list */
+-};
+-
+-static struct usb_gadget_strings ct_func_string_table = {
+-	.language	= 0x0409,	/* en-US */
+-	.strings	= ct_func_string_defs,
+-};
+-
+-static struct usb_gadget_strings *ct_func_strings[] = {
+-	&ct_func_string_table,
+-	NULL,
+-};
+ 
+ /*-------------------------------------------------------------------------*/
+ /*                              Char Device                                */
+@@ -526,7 +510,14 @@ try_again:
+ 	}
+ 
+ 	req->status   = 0;
+-	req->zero     = 1;
++	/*
++	 * A HID report never exceeds wMaxPacketSize, so one packet is the
++	 * whole transfer; never append a zero-length packet.  With zero = 1
++	 * every full-size report was followed by a ZLP, which no real HID
++	 * device sends and which occupied the next poll slot, halving the
++	 * achievable report rate.
++	 */
++	req->zero     = 0;
+ 	req->length   = count;
+ 	req->complete = f_hidg_req_complete;
+ 	req->context  = hidg;
+@@ -1163,7 +1154,6 @@ static int hidg_bind(struct usb_configuration *c, struct usb_function *f)
+ {
+ 	struct usb_ep		*ep;
+ 	struct f_hidg		*hidg = func_to_hidg(f);
+-	struct usb_string	*us;
+ 	int			status;
+ 
+ 	hidg->get_req = usb_ep_alloc_request(c->cdev->gadget->ep0, GFP_ATOMIC);
+@@ -1175,12 +1165,11 @@ static int hidg_bind(struct usb_configuration *c, struct usb_function *f)
+ 	hidg->get_req->context = hidg;
+ 	hidg->get_report_returned = true;
+ 
+-	/* maybe allocate device-global string IDs, and patch descriptors */
+-	us = usb_gstrings_attach(c->cdev, ct_func_strings,
+-				 ARRAY_SIZE(ct_func_string_defs));
+-	if (IS_ERR(us))
+-		return PTR_ERR(us);
+-	hidg_interface_desc.iInterface = us[CT_FUNC_HID_IDX].id;
++	/*
++	 * Real HID keyboards and mice carry no interface string, and the
++	 * former "HID Interface" string identified the Linux gadget stack.
++	 */
++	hidg_interface_desc.iInterface = 0;
+ 
+ 	/* allocate instance-specific interface IDs, and patch descriptors */
+ 	status = usb_interface_id(c, f);
+@@ -1211,7 +1200,11 @@ static int hidg_bind(struct usb_configuration *c, struct usb_function *f)
+ 	hidg_interface_desc.bInterfaceProtocol = hidg->bInterfaceProtocol;
+ 	hidg_interface_desc.bNumEndpoints = hidg->use_out_ep ? 2 : 1;
+ 	hidg->protocol = HID_REPORT_PROTOCOL;
+-	hidg->idle = 1;
++	/*
++	 * Idle rate 0 = report only on change, which is what this function
++	 * actually does (it never re-sends unchanged reports).
++	 */
++	hidg->idle = 0;
+ 	hidg_ss_in_ep_desc.wMaxPacketSize = cpu_to_le16(hidg->report_length);
+ 	hidg_ss_in_comp_desc.wBytesPerInterval =
+ 				cpu_to_le16(hidg->report_length);

@@ -56,7 +56,7 @@ class BridgeConfig:
     rescan_interval_ms: int = 1000
     tap_ms: int = 30
     step_ms: int = 20
-    macro_jitter_ms: int = 0
+    macro_jitter_ms: int = 30
     forward_leds: bool = True
     control_socket: str = "/run/hid-bridge/ctl.sock"
     log_level: str = "info"
@@ -223,6 +223,9 @@ def validate(cfg: Config) -> None:
                          ("mouse.poll_interval_ms", cfg.mouse.poll_interval_ms)):
         if not 1 <= value <= 255:
             raise ConfigError(f"{label} must be within 1-255")
+    gain = cfg.mouse.rel_to_abs_gain
+    if isinstance(gain, bool) or not isinstance(gain, (int, float)) or gain <= 0:
+        raise ConfigError("mouse.rel_to_abs_gain must be a positive number")
     if cfg.bridge.macro_jitter_ms < 0:
         raise ConfigError("bridge.macro_jitter_ms must be >= 0")
     if cfg.bridge.log_level.upper() not in ("DEBUG", "INFO", "WARNING", "ERROR"):

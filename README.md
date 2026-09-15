@@ -44,9 +44,12 @@ the KVM as a new game controller.
 `docs/usb-identity.md` is the field-by-field accounting, checked against the
 Raspberry Pi 6.12 kernel sources, of what is pinned, what the kernel decides,
 what a deep inspection could still notice, and how to verify the enumeration
-from Windows or a Linux host.  `kernel-patches/` removes the remaining
-kernel-side tells (bcdHID 1.01, qualifier/LPM answers at full speed) for
-those who rebuild the kernel.
+from Windows or a Linux host.  `kernel-patches/` (five patches for
+rpi-6.12.y) removes the remaining kernel-side tells: bcdHID 1.01 and the
+Linux interface string, qualifier/LPM answers at full speed, class requests
+for report types the device does not have, remote wakeup, and the
+self-powered/remote-wakeup/test-mode/interface-status answers of the
+standard requests.
 
 **New here?  Read `docs/GUIDE.md`**, the step-by-step implementation, testing,
 deployment and use guide written for a first-time builder.  The rest of this
@@ -118,12 +121,16 @@ in `[[inputs]]` rules; their keystrokes never reach the PC directly.
   forwarded keystrokes (Ctrl+Alt+Del included).  Unplugging a source releases
   every key it held.
 * The bridge behaves like the device it emulates: one report register per
-  interface, latest state wins, mouse motion accumulates between host polls.
-  If the PC stops polling (busy, suspended, off), nothing is queued and no
-  key can stick; the current state is delivered when polling resumes.  On a
-  stock kernel a key press does not wake a sleeping PC (see
-  `kernel-patches/0004`); the descriptor bit is still advertised, as on real
-  keyboards.
+  interface, key and button transitions are delivered in order, mouse motion
+  accumulates between host polls and saturates like an 8-bit counter when
+  the host stops collecting.  Nothing blocks and no key can stick.  While
+  the PC has suspended the bus the bridge waits with a backoff (motion
+  gathered while asleep is discarded, as on a real mouse) and re-sends the
+  current state on resume.  A key press wakes a sleeping PC only with
+  `kernel-patches/0004`; the descriptor bit is advertised either way, as on
+  real keyboards.
+* Nothing unsolicited: no report at start-up, and at shutdown only keys or
+  buttons that were actually held are released.
 * `GET_REPORT(Input)` on the control endpoint is answered instantly with the
   current key/button state, as a real keyboard does, via the kernel's
   GET_REPORT cache.

@@ -1,0 +1,168 @@
+From: hid-bridge project
+Subject: [PATCH 5/5] usb: dwc2, composite: standard-request answers of a real bus-powered device
+
+STATUS: written against rpi-6.12.y and verified to apply, NOT yet tested on
+CM5 hardware.
+
+Four standard-request behaviours differ from what a real bus-powered
+keyboard does and are visible to a host or analyser issuing the requests:
+
+- libcomposite marked the gadget self-powered at bind, so GET_STATUS(Device)
+  reported Self Powered until the first SET_CONFIGURATION.  Report
+  bus-powered until a configuration is selected; set_config() then follows
+  the configuration's bmAttributes as before.
+- dwc2 ACKed SET_FEATURE(DEVICE_REMOTE_WAKEUP) unconditionally and GET_STATUS
+  reflected it even when the configuration did not advertise remote wakeup.
+  Add the .set_remote_wakeup operation (called by libcomposite's set_config
+  with the configuration's wakeup bit), STALL the feature request when the
+  configuration does not support it, and clear both flags on bus reset.
+- dwc2 entered USB 2.0 test modes at full speed; they exist for high-speed
+  capable functions only, so STALL them when the gadget driver is limited
+  to full speed.
+- dwc2 answered GET_STATUS(Interface) with zero for any wIndex, configured
+  or not.  Delegate to the gadget driver, and have libcomposite answer
+  zero for an existing interface of the active configuration and STALL
+  otherwise (USB 2.0 section 9.4.5) for USB 2.0 devices too.
+
+---
+diff --git a/drivers/usb/dwc2/core.h b/drivers/usb/dwc2/core.h
+index 2bd74f3..9c3d991 100644
+--- a/drivers/usb/dwc2/core.h
++++ b/drivers/usb/dwc2/core.h
+@@ -1217,6 +1217,7 @@ struct dwc2_hsotg {
+ 	unsigned int enabled:1;
+ 	unsigned int connected:1;
+ 	unsigned int remote_wakeup_allowed:1;
++	unsigned int remote_wakeup_supported:1;
+ 	struct dwc2_hsotg_ep *eps_in[MAX_EPS_CHANNELS];
+ 	struct dwc2_hsotg_ep *eps_out[MAX_EPS_CHANNELS];
+ #endif /* CONFIG_USB_DWC2_PERIPHERAL || CONFIG_USB_DWC2_DUAL_ROLE */
+diff --git a/drivers/usb/dwc2/gadget.c b/drivers/usb/dwc2/gadget.c
+index e650c7b..3b8bcf3 100644
+--- a/drivers/usb/dwc2/gadget.c
++++ b/drivers/usb/dwc2/gadget.c
+@@ -1693,9 +1693,12 @@ static int dwc2_hsotg_process_req_status(struct dwc2_hsotg *hsotg,
+ 		break;
+ 
+ 	case USB_RECIP_INTERFACE:
+-		/* currently, the data result should be zero */
+-		reply = cpu_to_le16(0);
+-		break;
++		/*
++		 * Only the gadget driver knows whether the interface exists
++		 * and whether the device is configured; let it answer (or
++		 * STALL) instead of replying zero for any wIndex.
++		 */
++		return 0;
+ 
+ 	case USB_RECIP_ENDPOINT:
+ 		ep = ep_from_windex(hsotg, le16_to_cpu(ctrl->wIndex));
+@@ -1795,6 +1798,9 @@ static int dwc2_hsotg_process_req_feature(struct dwc2_hsotg *hsotg,
+ 	case USB_RECIP_DEVICE:
+ 		switch (wValue) {
+ 		case USB_DEVICE_REMOTE_WAKEUP:
++			/* Request Error unless the configuration supports it */
++			if (!hsotg->remote_wakeup_supported)
++				return -ENOENT;
+ 			if (set)
+ 				hsotg->remote_wakeup_allowed = 1;
+ 			else
+@@ -1806,6 +1812,10 @@ static int dwc2_hsotg_process_req_feature(struct dwc2_hsotg *hsotg,
+ 				return -EINVAL;
+ 			if (!set)
+ 				return -EINVAL;
++			/* Test modes exist for high-speed capable functions only */
++			if (hsotg->driver &&
++			    hsotg->driver->max_speed < USB_SPEED_HIGH)
++				return -ENOENT;
+ 
+ 			hsotg->test_mode = wIndex >> 8;
+ 			break;
+@@ -4891,6 +4901,25 @@ out:
+ 	return ret;
+ }
+ 
++/**
++ * dwc2_hsotg_set_remote_wakeup - record whether the active configuration
++ * advertises remote wakeup (libcomposite calls this from set_config).
++ * @gadget: The usb gadget state
++ * @set: 1 if the configuration's bmAttributes has the remote-wakeup bit
++ */
++static int dwc2_hsotg_set_remote_wakeup(struct usb_gadget *gadget, int set)
++{
++	struct dwc2_hsotg *hsotg = to_hsotg(gadget);
++	unsigned long flags;
++
++	spin_lock_irqsave(&hsotg->lock, flags);
++	hsotg->remote_wakeup_supported = !!set;
++	if (!set)
++		hsotg->remote_wakeup_allowed = 0;
++	spin_unlock_irqrestore(&hsotg->lock, flags);
++	return 0;
++}
++
+ static const struct usb_gadget_ops dwc2_hsotg_gadget_ops = {
+ 	.get_frame	= dwc2_hsotg_gadget_getframe,
+ 	.set_selfpowered	= dwc2_hsotg_set_selfpowered,
+@@ -4898,6 +4927,7 @@ static const struct usb_gadget_ops dwc2_hsotg_gadget_ops = {
+ 	.udc_stop		= dwc2_hsotg_udc_stop,
+ 	.pullup                 = dwc2_hsotg_pullup,
+ 	.wakeup			= dwc2_hsotg_gadget_wakeup,
++	.set_remote_wakeup	= dwc2_hsotg_set_remote_wakeup,
+ 	.udc_set_speed		= dwc2_gadget_set_speed,
+ 	.vbus_session		= dwc2_hsotg_vbus_session,
+ 	.vbus_draw		= dwc2_hsotg_vbus_draw,
+@@ -5119,6 +5149,7 @@ int dwc2_gadget_init(struct dwc2_hsotg *hsotg)
+ 	hsotg->gadget.name = dev_name(dev);
+ 	hsotg->gadget.otg_caps = &hsotg->params.otg_caps;
+ 	hsotg->remote_wakeup_allowed = 0;
++	hsotg->remote_wakeup_supported = 0;
+ 
+ 	if (hsotg->params.lpm)
+ 		hsotg->gadget.lpm_capable = true;
+diff --git a/drivers/usb/gadget/composite.c b/drivers/usb/gadget/composite.c
+index 88e890f..e5cf9a7 100644
+--- a/drivers/usb/gadget/composite.c
++++ b/drivers/usb/gadget/composite.c
+@@ -2014,16 +2014,19 @@ composite_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ctrl)
+ 		 * Note: function driver should supply such cb only for the
+ 		 * first interface of the function
+ 		 */
+-		if (!gadget_is_superspeed(gadget))
+-			goto unknown;
+ 		if (ctrl->bRequestType != (USB_DIR_IN | USB_RECIP_INTERFACE))
+ 			goto unknown;
+-		value = 2;	/* This is the length of the get_status reply */
+-		put_unaligned_le16(0, req->buf);
++		/* USB 2.0 9.4.5: Request Error unless configured and the
++		 * interface exists; the reply is otherwise all zero.
++		 */
+ 		if (!cdev->config || intf >= MAX_CONFIG_INTERFACES)
+-			break;
++			goto unknown;
+ 		f = cdev->config->interface[intf];
+ 		if (!f)
++			goto unknown;
++		value = 2;	/* This is the length of the get_status reply */
++		put_unaligned_le16(0, req->buf);
++		if (!gadget_is_superspeed(gadget))
+ 			break;
+ 
+ 		if (f->get_status) {
+@@ -2472,12 +2475,11 @@ int composite_dev_prepare(struct usb_composite_driver *composite,
+ 	cdev->driver = composite;
+ 
+ 	/*
+-	 * As per USB compliance update, a device that is actively drawing
+-	 * more than 100mA from USB must report itself as bus-powered in
+-	 * the GetStatus(DEVICE) call.
++	 * Report bus-powered until a configuration is selected; set_config()
++	 * then follows the configuration's bmAttributes.  A bus-powered
++	 * keyboard never claims to be self-powered in the Address state.
+ 	 */
+-	if (CONFIG_USB_GADGET_VBUS_DRAW <= USB_SELF_POWER_VBUS_MAX_DRAW)
+-		usb_gadget_set_selfpowered(gadget);
++	usb_gadget_clear_selfpowered(gadget);
+ 
+ 	/* interface and string IDs start at zero via kzalloc.
+ 	 * we force endpoints to start unassigned; few controller

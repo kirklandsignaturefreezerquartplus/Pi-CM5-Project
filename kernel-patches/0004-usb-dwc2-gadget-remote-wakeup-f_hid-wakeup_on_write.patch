@@ -1,5 +1,5 @@
 From: hid-bridge project
-Subject: [PATCH 4/4] usb: dwc2: gadget: implement remote wakeup; f_hid: wakeup_on_write
+Subject: [PATCH 4/5] usb: dwc2: gadget: implement remote wakeup; f_hid: wakeup_on_write
 
 STATUS: written against rpi-6.12.y and verified to apply, NOT yet tested on
 CM5 hardware.  Review the dwc2 hunk before deploying.
@@ -7,20 +7,39 @@ CM5 hardware.  Review the dwc2 hunk before deploying.
 dwc2 advertises remote wakeup capability (configfs bmAttributes bit 5) and
 records the host's SET_FEATURE(DEVICE_REMOTE_WAKEUP), but has no gadget
 .wakeup operation, so no function can ever initiate resume signalling.  Add
-one that mirrors the device-mode path of the wakeup-detected interrupt
-handler with remote wakeup signalling enabled (partial power down exit or
-clock-gating exit, else a plain DCTL.RmtWkUpSig), then clears RmtWkUpSig
-after 2-5 ms as USB 2.0 section 7.1.7.7 requires.  Hibernation exit is
-interrupt driven and is left as -EOPNOTSUPP.
+one that waits the 5 ms minimum suspend time of USB 2.0 section 7.1.7.7,
+then mirrors the device-mode path of the wakeup-detected interrupt handler
+with remote wakeup signalling enabled (hibernation exit, partial power
+down exit plus an explicit RmtWkUpSig, clock-gating exit, or a plain
+DCTL.RmtWkUpSig), and clears RmtWkUpSig after 2-5 ms.  Mark the gadget
+wakeup_capable so libcomposite keeps the configuration's wakeup bit.
 
 Give usb_f_hid a wakeup_on_write attribute: when set and the composite
 device is suspended, a write to /dev/hidgN requests remote wakeup before
 queueing, so a key press on a suspended host wakes it like a real keyboard.
+The composite device is only dereferenced once the function is known to
+be configured (hidg->req set).
 
 ---
+diff --git a/Documentation/ABI/testing/configfs-usb-gadget-hid b/Documentation/ABI/testing/configfs-usb-gadget-hid
+index fd8727f..8fb6474 100644
+--- a/Documentation/ABI/testing/configfs-usb-gadget-hid
++++ b/Documentation/ABI/testing/configfs-usb-gadget-hid
+@@ -20,4 +20,9 @@ Description:
+ 					descriptor, and reject report IDs the
+ 					descriptor does not use; STALL
+ 					everything else as a real device does
++		wakeup_on_write		if 1, a write to /dev/hidg<N> while
++					the bus is suspended first requests
++					USB remote wakeup (the UDC must
++					implement it and the host must have
++					enabled it)
+ 		===================	====================================
+diff --git a/drivers/usb/dwc2/gadget.c b/drivers/usb/dwc2/gadget.c
+index 71b8dac..e650c7b 100644
 --- a/drivers/usb/dwc2/gadget.c
 +++ b/drivers/usb/dwc2/gadget.c
-@@ -4793,12 +4793,94 @@
+@@ -4793,12 +4793,111 @@ static void dwc2_gadget_set_speed(struct usb_gadget *g, enum usb_device_speed sp
  	spin_unlock_irqrestore(&hsotg->lock, flags);
  }
  
@@ -44,6 +63,14 @@ queueing, so a key press on a suspended host wakes it like a real keyboard.
 +	u32 dctl;
 +	int ret = 0;
 +
++	/*
++	 * USB 2.0 7.1.7.7: a device may only drive resume after it has been
++	 * in Suspend for at least 5 ms.  The suspend interrupt fires ~3 ms
++	 * into bus idle, so a caller reacting to it immediately would be
++	 * early; waiting here costs nothing when the suspend is old.
++	 */
++	usleep_range(5000, 6000);
++
 +	spin_lock_irqsave(&hsotg->lock, flags);
 +
 +	if (!hsotg->remote_wakeup_allowed) {
@@ -60,8 +87,10 @@ queueing, so a key press on a suspended host wakes it like a real keyboard.
 +	}
 +
 +	if (hsotg->hibernated) {
-+		/* Device-mode hibernation exit is driven by GPWRDN interrupts */
-+		ret = -EOPNOTSUPP;
++		/* Restores the core and drives RmtWkUpSig itself (1-15 ms) */
++		ret = dwc2_gadget_exit_hibernation(hsotg, 1, 0);
++		if (ret)
++			dev_err(hsotg->dev, "exit hibernation failed\n");
 +		goto out;
 +	}
 +
@@ -71,6 +100,13 @@ queueing, so a key press on a suspended host wakes it like a real keyboard.
 +			dev_err(hsotg->dev, "exit partial_power_down failed\n");
 +			goto out;
 +		}
++		/*
++		 * The device-mode exit path restores DCTL from the backup and
++		 * never asserts RmtWkUpSig itself; do it after the restore.
++		 */
++		dctl = dwc2_readl(hsotg, DCTL);
++		dctl |= DCTL_RMTWKUPSIG;
++		dwc2_writel(hsotg, dctl, DCTL);
 +		call_gadget(hsotg, resume);
 +		signalled = true;
 +	} else if (hsotg->params.power_down == DWC2_POWER_DOWN_PARAM_NONE &&
@@ -115,22 +151,24 @@ queueing, so a key press on a suspended host wakes it like a real keyboard.
  	.udc_set_speed		= dwc2_gadget_set_speed,
  	.vbus_session		= dwc2_hsotg_vbus_session,
  	.vbus_draw		= dwc2_hsotg_vbus_draw,
---- a/drivers/usb/gadget/function/u_hid.h
-+++ b/drivers/usb/gadget/function/u_hid.h
-@@ -22,6 +22,7 @@
- 	unsigned char			protocol;
- 	unsigned char			no_out_endpoint;
- 	unsigned char			strict_report_types;
-+	unsigned char			wakeup_on_write;
- 	unsigned short			report_length;
- 	unsigned short			report_desc_length;
- 	unsigned char			*report_desc;
+@@ -5024,6 +5123,9 @@ int dwc2_gadget_init(struct dwc2_hsotg *hsotg)
+ 	if (hsotg->params.lpm)
+ 		hsotg->gadget.lpm_capable = true;
+ 
++	/* .wakeup is implemented: keep libcomposite's remote-wakeup bit */
++	hsotg->gadget.wakeup_capable = true;
++
+ 	if (hsotg->dr_mode == USB_DR_MODE_OTG)
+ 		hsotg->gadget.is_otg = 1;
+ 	else if (hsotg->dr_mode == USB_DR_MODE_PERIPHERAL)
+diff --git a/drivers/usb/gadget/function/f_hid.c b/drivers/usb/gadget/function/f_hid.c
+index 6677da8..b50b6db 100644
 --- a/drivers/usb/gadget/function/f_hid.c
 +++ b/drivers/usb/gadget/function/f_hid.c
-@@ -83,6 +83,12 @@
- 	 *              accepted for Output reports; anything else is STALLed.
- 	 */
- 	bool				strict_report_types;
+@@ -86,6 +86,12 @@ struct f_hidg {
+ 	/* derived from the report descriptor at bind (see hidg_scan_report_desc) */
+ 	bool				has_output_report;
+ 	bool				uses_report_ids;
 +	/*
 +	 * wakeup_on_write - if true, a write while the bus is suspended first
 +	 *              requests USB remote wakeup, as a real keyboard does when
@@ -140,27 +178,42 @@ queueing, so a key press on a suspended host wakes it like a real keyboard.
  
  	/* recv report */
  	spinlock_t			read_spinlock;
-@@ -479,10 +485,19 @@
+@@ -466,6 +472,7 @@ static ssize_t f_hidg_write(struct file *file, const char __user *buffer,
  			    size_t count, loff_t *offp)
  {
  	struct f_hidg *hidg  = file->private_data;
-+	struct usb_composite_dev *cdev = hidg->func.config->cdev;
++	struct usb_composite_dev *cdev;
  	struct usb_request *req;
  	unsigned long flags;
  	ssize_t status = -ENOMEM;
+@@ -477,6 +484,26 @@ static ssize_t f_hidg_write(struct file *file, const char __user *buffer,
+ 		return -ESHUTDOWN;
+ 	}
  
 +	/*
 +	 * New data while the host has us suspended: ask for remote wakeup
 +	 * before queueing, otherwise the request cannot be submitted.  The
 +	 * UDC refuses (-EINVAL) when the host did not enable remote wakeup.
++	 * hidg->req being set means the function is bound and configured,
++	 * so func.config->cdev is valid here.
 +	 */
-+	if (hidg->wakeup_on_write && cdev->suspended)
-+		usb_gadget_wakeup(cdev->gadget);
++	if (hidg->wakeup_on_write) {
++		cdev = hidg->func.config->cdev;
++		if (cdev->suspended) {
++			spin_unlock_irqrestore(&hidg->write_spinlock, flags);
++			usb_gadget_wakeup(cdev->gadget);
++			spin_lock_irqsave(&hidg->write_spinlock, flags);
++			if (!hidg->req) {
++				spin_unlock_irqrestore(&hidg->write_spinlock, flags);
++				return -ESHUTDOWN;
++			}
++		}
++	}
 +
- 	spin_lock_irqsave(&hidg->write_spinlock, flags);
- 
- 	if (!hidg->req) {
-@@ -1397,6 +1412,7 @@
+ #define WRITE_COND (!hidg->write_pending)
+ try_again:
+ 	/* write queue */
+@@ -1428,6 +1455,7 @@ F_HID_OPT(subclass, 8, 255);
  F_HID_OPT(protocol, 8, 255);
  F_HID_OPT(no_out_endpoint, 8, 1);
  F_HID_OPT(strict_report_types, 8, 1);
@@ -168,7 +221,7 @@ queueing, so a key press on a suspended host wakes it like a real keyboard.
  F_HID_OPT(report_length, 16, 65535);
  
  static ssize_t f_hid_opts_report_desc_show(struct config_item *item, char *page)
-@@ -1458,6 +1474,7 @@
+@@ -1489,6 +1517,7 @@ static struct configfs_attribute *hid_attrs[] = {
  	&f_hid_opts_attr_protocol,
  	&f_hid_opts_attr_no_out_endpoint,
  	&f_hid_opts_attr_strict_report_types,
@@ -176,23 +229,23 @@ queueing, so a key press on a suspended host wakes it like a real keyboard.
  	&f_hid_opts_attr_report_length,
  	&f_hid_opts_attr_report_desc,
  	&f_hid_opts_attr_dev,
-@@ -1604,6 +1621,7 @@
+@@ -1635,6 +1664,7 @@ static struct usb_function *hidg_alloc(struct usb_function_instance *fi)
  	}
  	hidg->use_out_ep = !opts->no_out_endpoint;
  	hidg->strict_report_types = opts->strict_report_types;
 +	hidg->wakeup_on_write = opts->wakeup_on_write;
+ 	hidg_scan_report_desc(hidg);
  
  	++opts->refcnt;
- 	mutex_unlock(&opts->lock);
---- a/Documentation/ABI/testing/configfs-usb-gadget-hid
-+++ b/Documentation/ABI/testing/configfs-usb-gadget-hid
-@@ -19,4 +19,9 @@
- 					Output reports; STALL other report
- 					types as a device without Feature
- 					reports does
-+		wakeup_on_write		if 1, a write to /dev/hidg<N> while
-+					the bus is suspended first requests
-+					USB remote wakeup (the UDC must
-+					implement it and the host must have
-+					enabled it)
- 		===================	====================================
+diff --git a/drivers/usb/gadget/function/u_hid.h b/drivers/usb/gadget/function/u_hid.h
+index 0ede046..f7e8145 100644
+--- a/drivers/usb/gadget/function/u_hid.h
++++ b/drivers/usb/gadget/function/u_hid.h
+@@ -22,6 +22,7 @@ struct f_hid_opts {
+ 	unsigned char			protocol;
+ 	unsigned char			no_out_endpoint;
+ 	unsigned char			strict_report_types;
++	unsigned char			wakeup_on_write;
+ 	unsigned short			report_length;
+ 	unsigned short			report_desc_length;
+ 	unsigned char			*report_desc;

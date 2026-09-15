@@ -27,6 +27,7 @@ EV_REP = 0x14
 EV_MAX = 0x1F
 
 SYN_REPORT = 0
+SYN_DROPPED = 3
 
 REL_X = 0x00
 REL_Y = 0x01
@@ -106,6 +107,10 @@ def EVIOCGPHYS(length: int) -> int:
 
 def EVIOCGUNIQ(length: int) -> int:
     return _IOC(_IOC_READ, "E", 0x08, length)
+
+
+def EVIOCGKEY(length: int) -> int:
+    return _IOC(_IOC_READ, "E", 0x18, length)
 
 
 def EVIOCGLED(length: int) -> int:
@@ -297,6 +302,19 @@ class InputDevice:
             if len(data) < size * 64:
                 break
         return events
+
+    def active_keys(self) -> set[int]:
+        """Keys and buttons currently held according to the kernel (EVIOCGKEY).
+
+        Used to resynchronise after the kernel dropped events (SYN_DROPPED).
+        """
+        length = KEY_MAX // 8 + 1
+        buf = bytearray(length)
+        try:
+            fcntl.ioctl(self.fd, EVIOCGKEY(length), buf)
+        except OSError:
+            return set()
+        return _bits_from_buffer(bytes(buf))
 
     def set_led(self, led_code: int, on: bool) -> None:
         if led_code not in self.led_bits:

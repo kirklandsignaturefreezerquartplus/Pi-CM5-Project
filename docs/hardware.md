@@ -56,9 +56,11 @@ Two things to check on your specific carrier before connecting link C:
    normal position, otherwise the module enumerates as a BCM boot device
    instead of running your OS.
 
-If the PC is powered off, USB ports on many motherboards still supply 5 V.
-That is harmless for the gadget; the bridge simply drops reports until the
-host enumerates (`hid-bridge ctl status` shows `host_connected: false`).
+If the PC is powered off, USB ports on many motherboards still supply 5 V and
+keep the port idle rather than resetting it.  To the CM5 that looks like a
+bus *suspend*, not a disconnect: `hid-bridge ctl status` shows
+`backing_off: true` and reports wait for the PC to come back.  A port that
+drops or resets shows `host_connected: false` instead.  Both are harmless.
 
 ## PiKVM side
 

@@ -93,9 +93,16 @@ def udc_current_state(udc: str) -> str:
     return _read(os.path.join(UDC_SYSFS, udc, "state"), "unknown")
 
 
-def udc_state(udc: str) -> dict:
+def udc_state(udc: str, full_speed_patched: bool = False) -> dict:
+    """UDC state; ``full_speed_patched`` = kernel-patches/0002 present and max_speed full-speed."""
     base = os.path.join(UDC_SYSFS, udc)
     lpm = udc_lpm_enabled(udc)
+    if full_speed_patched:
+        wire = "0x0200 (kernel-patches/0002: no LPM/BOS at full speed)"
+    elif lpm is None:
+        wire = "unknown"
+    else:
+        wire = "0x0201 (+BOS)" if lpm else "0x0200"
     return {
         "udc": udc,
         "state": _read(os.path.join(base, "state"), "unknown"),
@@ -103,7 +110,8 @@ def udc_state(udc: str) -> dict:
         "maximum_speed": _read(os.path.join(base, "maximum_speed"), "unknown"),
         "function": _read(os.path.join(base, "function"), ""),
         "lpm": lpm,
-        "bcdUSB_on_wire": "unknown" if lpm is None else ("0x0201 (+BOS)" if lpm else "0x0200"),
+        "bcdUSB_on_wire": wire,
+        "suspended": _read(os.path.join(base, "gadget", "suspended"), "n/a"),
     }
 
 
@@ -268,6 +276,8 @@ class Gadget:
         _write(os.path.join(mouse, "report_desc"), self.mouse_descriptor())
         _write_optional(os.path.join(mouse, "no_out_endpoint"), "1", "single-IN-endpoint HID (no_out_endpoint)", self.warnings)
         _write_optional(os.path.join(mouse, "strict_report_types"), "1", "report-type checking of GET/SET_REPORT (strict_report_types, see kernel-patches/)", self.warnings)
+        if g.remote_wakeup:
+            _write_optional(os.path.join(mouse, "wakeup_on_write"), "1", "remote wakeup on mouse activity (wakeup_on_write)", self.warnings)
         _write_optional(os.path.join(mouse, "interval"), str(self.cfg.mouse.poll_interval_ms), "mouse bInterval", self.warnings)
 
         # Interface order = link order: keyboard first, mouse second.
@@ -284,10 +294,26 @@ class Gadget:
         log.info("gadget %s bound to %s", g.name, udc)
 
         devices = self.resolve_devices()
+        self._prime_get_report(devices)
         self._write_state(devices)
         for warning in self.warnings:
             log.warning("%s", warning)
         return devices
+
+    def _prime_get_report(self, devices: dict) -> None:
+        """Answer GET_REPORT immediately even before hid-bridge runs.
+
+        Without a cached report usb_f_hid waits 2.5 s and answers zeros; a
+        real keyboard answers at once.
+        """
+        from .hidg import HidgDevice
+        for role, length in (("keyboard", devices["keyboard_report_length"]), ("mouse", devices["mouse_report_length"])):
+            try:
+                sink = HidgDevice(devices[role], length, role)
+                sink.open()
+                sink.close()
+            except OSError as exc:
+                self.warnings.append(f"could not prime GET_REPORT for {role}: {exc.strerror}")
 
     def down(self) -> None:
         if not self.exists():
@@ -362,6 +388,10 @@ class Gadget:
         except OSError as exc:
             log.warning("cannot write %s: %s", STATE_FILE, exc)
 
+    def patched_kernel(self) -> bool:
+        """True when the kernel carries kernel-patches/ (detected via the 0003 attribute)."""
+        return os.path.exists(self._p("functions", KEYBOARD_FUNCTION, "strict_report_types"))
+
     def status(self) -> dict:
         info: dict = {"gadget": self.path, "exists": self.exists(), "bound": False}
         if not self.exists():
@@ -395,8 +425,9 @@ class Gadget:
                     "interval": _read(os.path.join(base, "interval"), "n/a"),
                     "dev": _read(os.path.join(base, "dev"), "n/a"),
                 }
+        info["patched_kernel"] = self.patched_kernel()
         if udc:
-            info["udc"] = udc_state(udc)
+            info["udc"] = udc_state(udc, self.patched_kernel() and self.g.max_speed == "full-speed")
             try:
                 info["devices"] = self.resolve_devices(timeout=0.5)
             except GadgetError as exc:

@@ -55,6 +55,9 @@ class ConfigTests(unittest.TestCase):
             {"macros": {"bad": ["wait x"]}},
             {"macros": {"bad": 5}},
             {"bridge": {"log_level": "loud"}},
+            {"mouse": {"rel_to_abs_gain": "17"}},
+            {"mouse": {"rel_to_abs_gain": 0}},
+            {"mouse": {"rel_to_abs_gain": True}},
         ]
         for data in cases:
             with self.assertRaises(ConfigError, msg=repr(data)):

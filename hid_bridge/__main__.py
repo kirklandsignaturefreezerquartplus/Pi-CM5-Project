@@ -117,8 +117,10 @@ def cmd_check(args, cfg) -> int:
     if any(strings_set) and not all(strings_set):
         print("  note: set all of manufacturer/product/serial or none; an unset one becomes an empty string descriptor"
               " (install.sh fills in a random serial on first install)")
-    print("kernel-fixed: bcdUSB 0x0200 (0x0201 + BOS when the controller enables LPM), bMaxPacketSize0 64, "
-          "bcdHID 1.01, bInterval 10 ms at full speed / 1 ms at high speed")
+    print("kernel-fixed on a stock kernel: bcdUSB 0x0200 (0x0201 + BOS when the controller enables LPM), "
+          "bMaxPacketSize0 64, bcdHID 1.01, bInterval 10 ms at full speed / 1 ms at high speed")
+    print("with kernel-patches/ installed: bcdHID 1.10, bcdUSB 0x0200 without BOS at full speed, GET_IDLE 0, "
+          "report-type checks, remote wakeup; bMaxPacketSize0 and bInterval unchanged")
 
     kbd = keyboard_report_descriptor(cfg.keyboard.descriptor == "extended")
     in_bits, out_bits = report_bit_sizes(kbd)
@@ -159,6 +161,7 @@ def cmd_check(args, cfg) -> int:
     if gadget.exists():
         st = gadget.status()
         print(f"  gadget {g.name}: {'bound to ' + st['udc']['udc'] + ', host state ' + st['udc']['state'] + ', speed ' + st['udc']['current_speed'] if st.get('bound') else 'present, unbound'}")
+        print(f"  kernel-patches/ present: {'yes (strict_report_types attribute found)' if st.get('patched_kernel') else 'no'}")
         if st.get("bound"):
             print(f"  controller LPM: {st['udc']['lpm']} -> device descriptor bcdUSB on the wire: {st['udc']['bcdUSB_on_wire']}")
         for role, func in st.get("functions", {}).items():

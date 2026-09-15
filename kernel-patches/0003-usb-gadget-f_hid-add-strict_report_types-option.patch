@@ -1,105 +1,28 @@
 From: hid-bridge project
-Subject: [PATCH 3/3] usb: gadget: f_hid: add strict_report_types option
+Subject: [PATCH 3/5] usb: gadget: f_hid: add strict_report_types option
 
-The function ignores the report type in wValue of the GET_REPORT and
-SET_REPORT class requests.  A GET_REPORT for a Feature or Output report is
-answered with the Input report, and a SET_REPORT of any type (including an
-Input report, which a host never legitimately sends) is delivered to user
-space as if it were an Output report.  Real devices whose descriptor has
-only Input and Output reports STALL those requests.
+The function ignores the report type and report ID in wValue of the
+GET_REPORT and SET_REPORT class requests.  A GET_REPORT for a Feature or
+Output report is answered with the Input report, a GET_REPORT for a report
+ID the descriptor does not declare waits 2.5 s and answers zeros, and a
+SET_REPORT of any type (including an Input report, which a host never
+legitimately sends, or an Output report to a function whose descriptor has
+none) is delivered to user space as if it were the LED report.  Real
+devices STALL those requests.
 
 Add a configfs attribute strict_report_types (default 0, previous
-behaviour).  When set, GET_REPORT is served only for report type Input and
-SET_REPORT is accepted only for report type Output; every other type is
-STALLed.
+behaviour).  When set, GET_REPORT is served only for report type Input,
+SET_REPORT is accepted only for report type Output and only when the
+report descriptor declares an Output item, and a non-zero report ID is
+rejected when the descriptor uses none.  The descriptor is scanned once at
+bind.
 
 ---
---- a/drivers/usb/gadget/function/u_hid.h
-+++ b/drivers/usb/gadget/function/u_hid.h
-@@ -21,6 +21,7 @@
- 	unsigned char			subclass;
- 	unsigned char			protocol;
- 	unsigned char			no_out_endpoint;
-+	unsigned char			strict_report_types;
- 	unsigned short			report_length;
- 	unsigned short			report_desc_length;
- 	unsigned char			*report_desc;
---- a/drivers/usb/gadget/function/f_hid.c
-+++ b/drivers/usb/gadget/function/f_hid.c
-@@ -30,6 +30,10 @@
-  */
- #define GET_REPORT_TIMEOUT_MS 2500
- 
-+/* Report type in the high byte of wValue (HID 1.11, 7.2.1 / 7.2.2) */
-+#define HID_WIRE_REPORT_TYPE_INPUT	1
-+#define HID_WIRE_REPORT_TYPE_OUTPUT	2
-+
- static int major, minors;
- 
- static const struct class hidg_class = {
-@@ -71,6 +75,14 @@
- 	 *              will be used to receive reports.
- 	 */
- 	bool				use_out_ep;
-+	/*
-+	 * strict_report_types - if true, validate the report type in the
-+	 *              wValue of GET_REPORT/SET_REPORT like a real device
-+	 *              with only Input and Output reports does: GET_REPORT is
-+	 *              only served for Input reports and SET_REPORT is only
-+	 *              accepted for Output reports; anything else is STALLed.
-+	 */
-+	bool				strict_report_types;
- 
- 	/* recv report */
- 	spinlock_t			read_spinlock;
-@@ -874,6 +886,10 @@
- 		  | HID_REQ_GET_REPORT):
- 		VDBG(cdev, "get_report | wLength=%d\n", ctrl->wLength);
- 
-+		if (hidg->strict_report_types &&
-+		    (value >> 8) != HID_WIRE_REPORT_TYPE_INPUT)
-+			goto stall;
-+
- 		/*
- 		 * Update GET_REPORT ID so that an ioctl can be used to determine what
- 		 * GET_REPORT the request was actually for.
-@@ -908,6 +924,9 @@
- 		VDBG(cdev, "set_report | wLength=%d\n", ctrl->wLength);
- 		if (hidg->use_out_ep)
- 			goto stall;
-+		if (hidg->strict_report_types &&
-+		    (value >> 8) != HID_WIRE_REPORT_TYPE_OUTPUT)
-+			goto stall;
- 		req->complete = hidg_ssreport_complete;
- 		req->context  = hidg;
- 		goto respond;
-@@ -1373,6 +1392,7 @@
- F_HID_OPT(subclass, 8, 255);
- F_HID_OPT(protocol, 8, 255);
- F_HID_OPT(no_out_endpoint, 8, 1);
-+F_HID_OPT(strict_report_types, 8, 1);
- F_HID_OPT(report_length, 16, 65535);
- 
- static ssize_t f_hid_opts_report_desc_show(struct config_item *item, char *page)
-@@ -1433,6 +1453,7 @@
- 	&f_hid_opts_attr_subclass,
- 	&f_hid_opts_attr_protocol,
- 	&f_hid_opts_attr_no_out_endpoint,
-+	&f_hid_opts_attr_strict_report_types,
- 	&f_hid_opts_attr_report_length,
- 	&f_hid_opts_attr_report_desc,
- 	&f_hid_opts_attr_dev,
-@@ -1578,6 +1599,7 @@
- 		}
- 	}
- 	hidg->use_out_ep = !opts->no_out_endpoint;
-+	hidg->strict_report_types = opts->strict_report_types;
- 
- 	++opts->refcnt;
- 	mutex_unlock(&opts->lock);
+diff --git a/Documentation/ABI/testing/configfs-usb-gadget-hid b/Documentation/ABI/testing/configfs-usb-gadget-hid
+index 748705c..fd8727f 100644
 --- a/Documentation/ABI/testing/configfs-usb-gadget-hid
 +++ b/Documentation/ABI/testing/configfs-usb-gadget-hid
-@@ -4,10 +4,19 @@
+@@ -4,10 +4,20 @@ KernelVersion:	3.19
  Description:
  		The attributes:
  
@@ -121,8 +44,146 @@ STALLed.
 +					on the control endpoint instead of an
 +					interrupt OUT endpoint
 +		strict_report_types	if 1, serve GET_REPORT only for Input
-+					reports and accept SET_REPORT only for
-+					Output reports; STALL other report
-+					types as a device without Feature
-+					reports does
++					reports, accept SET_REPORT only for
++					Output reports declared by the report
++					descriptor, and reject report IDs the
++					descriptor does not use; STALL
++					everything else as a real device does
 +		===================	====================================
+diff --git a/drivers/usb/gadget/function/f_hid.c b/drivers/usb/gadget/function/f_hid.c
+index b26ab8c..6677da8 100644
+--- a/drivers/usb/gadget/function/f_hid.c
++++ b/drivers/usb/gadget/function/f_hid.c
+@@ -30,6 +30,10 @@
+  */
+ #define GET_REPORT_TIMEOUT_MS 2500
+ 
++/* Report type in the high byte of wValue (HID 1.11, 7.2.1 / 7.2.2) */
++#define HID_WIRE_REPORT_TYPE_INPUT	1
++#define HID_WIRE_REPORT_TYPE_OUTPUT	2
++
+ static int major, minors;
+ 
+ static const struct class hidg_class = {
+@@ -71,6 +75,17 @@ struct f_hidg {
+ 	 *              will be used to receive reports.
+ 	 */
+ 	bool				use_out_ep;
++	/*
++	 * strict_report_types - if true, validate the report type in the
++	 *              wValue of GET_REPORT/SET_REPORT like a real device
++	 *              with only Input and Output reports does: GET_REPORT is
++	 *              only served for Input reports and SET_REPORT is only
++	 *              accepted for Output reports; anything else is STALLed.
++	 */
++	bool				strict_report_types;
++	/* derived from the report descriptor at bind (see hidg_scan_report_desc) */
++	bool				has_output_report;
++	bool				uses_report_ids;
+ 
+ 	/* recv report */
+ 	spinlock_t			read_spinlock;
+@@ -865,6 +880,11 @@ static int hidg_setup(struct usb_function *f,
+ 		  | HID_REQ_GET_REPORT):
+ 		VDBG(cdev, "get_report | wLength=%d\n", ctrl->wLength);
+ 
++		if (hidg->strict_report_types &&
++		    ((value >> 8) != HID_WIRE_REPORT_TYPE_INPUT ||
++		     (!hidg->uses_report_ids && (value & 0xff) != 0)))
++			goto stall;
++
+ 		/*
+ 		 * Update GET_REPORT ID so that an ioctl can be used to determine what
+ 		 * GET_REPORT the request was actually for.
+@@ -899,6 +919,11 @@ static int hidg_setup(struct usb_function *f,
+ 		VDBG(cdev, "set_report | wLength=%d\n", ctrl->wLength);
+ 		if (hidg->use_out_ep)
+ 			goto stall;
++		if (hidg->strict_report_types &&
++		    ((value >> 8) != HID_WIRE_REPORT_TYPE_OUTPUT ||
++		     !hidg->has_output_report ||
++		     (!hidg->uses_report_ids && (value & 0xff) != 0)))
++			goto stall;
+ 		req->complete = hidg_ssreport_complete;
+ 		req->context  = hidg;
+ 		goto respond;
+@@ -1150,6 +1175,42 @@ static const struct file_operations f_hidg_fops = {
+ 	.llseek		= noop_llseek,
+ };
+ 
++/*
++ * hidg_scan_report_desc - note whether the report descriptor declares any
++ * Output main items and whether it uses Report IDs.  Short items only need
++ * the prefix byte; long items (0xfe) carry their size in the next byte.
++ */
++static void hidg_scan_report_desc(struct f_hidg *hidg)
++{
++	const unsigned char *desc = hidg->report_desc;
++	unsigned int len = hidg->report_desc_length;
++	unsigned int i = 0;
++
++	hidg->has_output_report = false;
++	hidg->uses_report_ids = false;
++	if (!desc)
++		return;
++
++	while (i < len) {
++		unsigned char prefix = desc[i++];
++		unsigned int size = prefix & 0x03;
++
++		if (prefix == 0xfe) {
++			if (i >= len)
++				break;
++			i += desc[i] + 2;
++			continue;
++		}
++		if (size == 3)
++			size = 4;
++		if ((prefix & 0xfc) == 0x90)		/* Main item: Output */
++			hidg->has_output_report = true;
++		else if ((prefix & 0xfc) == 0x84)	/* Global item: Report ID */
++			hidg->uses_report_ids = true;
++		i += size;
++	}
++}
++
+ static int hidg_bind(struct usb_configuration *c, struct usb_function *f)
+ {
+ 	struct usb_ep		*ep;
+@@ -1366,6 +1427,7 @@ CONFIGFS_ATTR(f_hid_opts_, name)
+ F_HID_OPT(subclass, 8, 255);
+ F_HID_OPT(protocol, 8, 255);
+ F_HID_OPT(no_out_endpoint, 8, 1);
++F_HID_OPT(strict_report_types, 8, 1);
+ F_HID_OPT(report_length, 16, 65535);
+ 
+ static ssize_t f_hid_opts_report_desc_show(struct config_item *item, char *page)
+@@ -1426,6 +1488,7 @@ static struct configfs_attribute *hid_attrs[] = {
+ 	&f_hid_opts_attr_subclass,
+ 	&f_hid_opts_attr_protocol,
+ 	&f_hid_opts_attr_no_out_endpoint,
++	&f_hid_opts_attr_strict_report_types,
+ 	&f_hid_opts_attr_report_length,
+ 	&f_hid_opts_attr_report_desc,
+ 	&f_hid_opts_attr_dev,
+@@ -1571,6 +1634,8 @@ static struct usb_function *hidg_alloc(struct usb_function_instance *fi)
+ 		}
+ 	}
+ 	hidg->use_out_ep = !opts->no_out_endpoint;
++	hidg->strict_report_types = opts->strict_report_types;
++	hidg_scan_report_desc(hidg);
+ 
+ 	++opts->refcnt;
+ 	mutex_unlock(&opts->lock);
+diff --git a/drivers/usb/gadget/function/u_hid.h b/drivers/usb/gadget/function/u_hid.h
+index 84bb702..0ede046 100644
+--- a/drivers/usb/gadget/function/u_hid.h
++++ b/drivers/usb/gadget/function/u_hid.h
+@@ -21,6 +21,7 @@ struct f_hid_opts {
+ 	unsigned char			subclass;
+ 	unsigned char			protocol;
+ 	unsigned char			no_out_endpoint;
++	unsigned char			strict_report_types;
+ 	unsigned short			report_length;
+ 	unsigned short			report_desc_length;
+ 	unsigned char			*report_desc;

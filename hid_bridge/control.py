@@ -69,7 +69,8 @@ class ControlServer:
         except (BlockingIOError, InterruptedError):
             return
         with conn:
-            conn.settimeout(0.5)
+            # Local clients send immediately; never let one hold the main loop.
+            conn.settimeout(0.05)
             try:
                 chunks = []
                 total = 0

@@ -37,8 +37,8 @@ max_speed = "full-speed"
 self_powered = false      # bmAttributes bit 6; false = looks bus powered like a real keyboard
 remote_wakeup = true      # bmAttributes bit 5, as real keyboards advertise. A key press only wakes a
                           # sleeping PC with kernel-patches/0004 installed (stock dwc2 cannot signal
-                          # remote wakeup); set false to keep descriptor and behaviour consistent
-                          # on a stock kernel.
+                          # remote wakeup). With false, a stock dwc2 still ACKs SET_FEATURE(REMOTE_WAKEUP);
+                          # kernel-patches/0005 makes it STALL like a real device without the bit.
 max_power_ma = 100        # MaxPower
 
 # Force a specific UDC name (see /sys/class/udc); empty = the first one found.
@@ -71,8 +71,8 @@ grab_inputs = true        # EVIOCGRAB every source so the CM5's own console neve
 rescan_interval_ms = 1000 # hot-plug detection period
 tap_ms = 30               # key/button hold time for macro taps and typing
 step_ms = 20              # pause between macro steps
-macro_jitter_ms = 0       # add 0..N ms of random jitter to macro taps/gaps so typed macros
-                          # do not have a perfectly regular, machine-like cadence (try 40)
+macro_jitter_ms = 30      # add 0..N ms of right-skewed random jitter to macro taps/gaps so typed
+                          # macros do not have a perfectly regular, machine-like cadence (0 = off)
 forward_leds = true       # send Caps/Num/Scroll Lock state from the target back to the sources
 control_socket = "/run/hid-bridge/ctl.sock"
 log_level = "info"        # debug | info | warning | error

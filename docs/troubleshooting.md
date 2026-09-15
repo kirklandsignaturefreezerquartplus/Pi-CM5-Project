@@ -47,13 +47,16 @@ holds the device.  Run Raspberry Pi OS **Lite** on the CM5 and keep
 with ESHUTDOWN: the PC has not configured the device.  See the UDC section
 above.  Reports are dropped, not queued, until it does.
 
-## `deferred` keeps rising in `hid-bridge ctl status`
+## `deferred` keeps rising, or `backing_off: true`, in `hid-bridge ctl status`
 
-The host enumerated the device but is slow to fetch interrupt reports, or is
-suspended.  Nothing is lost: the bridge holds the latest key state and sums
-mouse motion until the host polls again, like a real device.  If the PC is
-asleep, a key press only wakes it with `kernel-patches/0004` installed; wake
-it by other means otherwise.
+`deferred` counts writes that had to wait for the host's next poll; a fast
+mouse stream makes it rise normally.  `backing_off: true` means the host has
+suspended the bus (PC asleep, or the OS selectively suspended the keyboard):
+dwc2 refuses reports until the host resumes, so the bridge retries with a
+growing delay and keeps the current key state for the resume.  A key press
+only wakes the PC with `kernel-patches/0004` installed; wake it by other
+means otherwise.  Motion made while the PC sleeps is discarded, as a real
+mouse's would be.
 
 ## A key seems stuck on the PC
 
@@ -78,8 +81,11 @@ and re-plug the PC side so it re-enumerates.
 
 ## Windows shows "Unknown USB Device (Device Descriptor Request Failed)"
 
-Almost always cabling/port or a half-created gadget.  `hid-bridge gadget down
-&& hid-bridge gadget up`, replug, check `dmesg` on the CM5 for dwc2 errors.
+Almost always cabling/port or a half-created gadget.  `sudo systemctl restart
+hid-gadget hid-bridge`, replug, check `dmesg` on the CM5 for dwc2 errors.
+(A manual `gadget down && gadget up` under a running bridge is tolerated:
+the bridge notices the recreated `/dev/hidg*` nodes within a second and
+reopens them.)
 
 ## "UDC ... is busy"
 
@@ -99,8 +105,13 @@ entries for `g_*` modules.
 
 ## Latency
 
-Full-speed HID with 2 ms mouse / 10 ms keyboard polling adds at most one poll
-interval plus the bridge's processing, typically well under 5 ms in total.
+Full-speed HID polls both interfaces every 10 ms on a stock kernel (the
+`poll_interval_ms` options only take effect on kernels with an f_hid
+`interval` attribute), so the bridge adds at most one poll interval plus its
+own processing, typically under 12 ms in total; `max_speed = "high-speed"`
+polls every 1 ms.  On a stock kernel each report also occupies the
+following poll slot with a zero-length packet, so a fast mouse stream is
+limited to one report every 20 ms; `kernel-patches/0001` removes that.
 If it feels slow, look for CPU hogs on the CM5 (`top`), and confirm the
 PiKVM is not in absolute mode being converted to relative.
 

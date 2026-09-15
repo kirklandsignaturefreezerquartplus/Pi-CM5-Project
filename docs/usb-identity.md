@@ -24,7 +24,11 @@ checked against the Raspberry Pi `rpi-6.12.y` kernel sources.
 | Report descriptor (mouse) | boot mouse + wheel | the first 3 report bytes are the boot format |
 | Report IDs | none | |
 | `GET_REPORT(Input)` | current key / button state, immediately | the bridge keeps `usb_f_hid`'s GET_REPORT cache current (`GADGET_HID_WRITE_GET_REPORT`, kernel ≥ 6.10); without it the kernel would stall the request for 2.5 s and answer zeros |
-| `GET_REPORT(Output/Feature)`, `SET_REPORT(Input/Feature)` | STALL, like a device with only Input and Output reports | `strict_report_types` from `kernel-patches/0003`; stock kernels answer them |
+| `GET_REPORT(Output/Feature)`, `SET_REPORT(Input/Feature)`, undeclared report IDs, `SET_REPORT(Output)` to the mouse | STALL, like a device with only the declared reports | `strict_report_types` from `kernel-patches/0003`; stock kernels answer them |
+| iInterface | 0 | `kernel-patches/0001`; stock `usb_f_hid` attaches a "HID Interface" string |
+| `GET_STATUS(Device)` before configuration, `SET_FEATURE(REMOTE_WAKEUP)` without the bit, `TEST_MODE` at full speed, `GET_STATUS(Interface)` for a bad index | bus-powered / STALL / STALL / STALL, like a real device | `kernel-patches/0005`; stock kernels answer them |
+| Interrupt IN traffic at start/stop of the bridge | none | no report at start-up; only held keys are released at shutdown |
+| Zero-length packet after each report | none, one packet per report | `kernel-patches/0001`; stock `usb_f_hid` terminates every full-size report with a ZLP, visible on an analyser and costing one poll slot per report |
 | `SET_PROTOCOL` / `GET_PROTOCOL` | accepted on both boot interfaces | `usb_f_hid` stores it; our reports already are boot format so nothing changes |
 | `SET_IDLE` / `GET_IDLE` | accepted | idle-rate re-sends are not implemented by `usb_f_hid`; Windows and UEFI set idle 0 anyway |
 | LED `SET_REPORT` | 1 byte over EP0 | forwarded to the PiKVM keyboard as EV_LED |
@@ -40,6 +44,13 @@ checked against the Raspberry Pi `rpi-6.12.y` kernel sources.
 | bInterval | 8–10 ms (FS) | 10 ms at full speed, 1 ms at high speed | constants in `usb_f_hid`; the `poll_interval_ms` options only take effect on kernels that add an `interval` attribute |
 | DEVICE_QUALIFIER / OTHER_SPEED_CONFIGURATION at full speed | STALL (FS-only device) | answered (qualifier says high-speed capable) | `gadget->max_speed` stays HIGH because dwc2 does not read a DT `maximum-speed`; only `params.speed` is lowered |
 | Remote wakeup | bit advertised and functional | bit advertised, **not functional** on a stock kernel | dwc2's gadget ops have no `.wakeup` and `usb_f_hid` has no `wakeup_on_write` in 6.12; `kernel-patches/0004` adds both |
+| iInterface | 0 | string index pointing at "HID Interface" | constant in `usb_f_hid`; `kernel-patches/0001` |
+| `GET_STATUS(Device)` in the Address state | bus-powered | self-powered | `composite_bind` sets it at bind; `kernel-patches/0005` |
+| `SET_FEATURE(REMOTE_WAKEUP)` with `remote_wakeup = false` | Request Error | ACKed | dwc2 has no `.set_remote_wakeup`; `kernel-patches/0005` |
+| `SET_FEATURE(TEST_MODE)` at full speed | Request Error | entered | dwc2; `kernel-patches/0005` |
+| `GET_STATUS(Interface 9)` | Request Error | 0x0000 | dwc2 answers without checking; `kernel-patches/0005` |
+| `GET_IDLE` before the host's `SET_IDLE` | 125 (500 ms) recommended | 1 on stock, 0 with `kernel-patches/0001` | documented deviation; a 500 ms rate would require periodic re-sends |
+| Interrupt IN transactions per report | 1 | 2 (report, then a zero-length packet) | `f_hidg_write` sets `req->zero`; `kernel-patches/0001` |
 | Unset strings | absent (index 0) | index allocated, empty string descriptor | `libcomposite` substitutes "" for unset strings once the language directory exists |
 
 Windows' HID class drivers and UEFI boot-keyboard drivers inspect none of
@@ -73,7 +84,9 @@ residual tells are indirect:
 | VBUS current ≈ 0 mA while declaring bus-powered 100 mA | USB power meter | hardware: the CM5 runs from its own supply |
 | The keyboard appears 15–25 s after the CM5 gets power and disconnects/reconnects whenever the CM5 or `hid-gadget.service` restarts | anyone watching enumeration | operational: power the CM5 before the PC, do not reboot it mid-session |
 | With the nRPIBOOT strap fitted (or boot media missing on some carriers) the BCM2712 boot ROM enumerates as a Broadcom boot device (`0a5c:2712`) on the same port | anyone | hardware: keep nRPIBOOT unfitted and boot media reliable |
-| Macro `type` steps with a fixed 30 ms/20 ms cadence look machine-generated in keystroke timing | timing analysis of typed text | `bridge.macro_jitter_ms` adds random jitter |
+| Macro `type` steps with a fixed cadence, or modifier and key landing in the same report, look machine-generated | timing / report-sequence analysis of typed text | modifiers now lead and follow the key in their own reports; `bridge.macro_jitter_ms` (default 30) adds right-skewed jitter |
+| D+ pull-up present while the PC port is unpowered, and attach with zero delay after port power-on (with the VBUS-blocking adapter the CM5 never sees the PC's 5 V) | meter on D+ with the port off; analyser timing VBUS-on to attach | hardware/operational: sense the PC's VBUS on a CM5 GPIO and drive `/sys/class/udc/<udc>/soft_connect`; see `docs/remaining-tells.md` §6 |
+| A `GET_REPORT` arriving while `hid-bridge.service` is stopped is answered after 2.5 s with zeros | analyser, only in that window | `hid-bridge gadget up` now primes the GET_REPORT cache itself |
 
 Recommended solves for every row that is not purely software are in
 `docs/remaining-tells.md`.

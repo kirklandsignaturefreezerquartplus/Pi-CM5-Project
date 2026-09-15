@@ -31,7 +31,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Generator, Iterable, Protocol
 
-from .keymap import US_LAYOUT, usage_from_name
+from .keymap import US_LAYOUT, is_modifier, usage_from_name
 from .reports import BUTTON_NAMES
 
 log = logging.getLogger("hid-bridge.macros")
@@ -192,9 +192,7 @@ class MacroTask:
             gap = eng.gap_delay()
             kind = step.kind
             if kind == "tap":
-                eng.press(step.keys)
-                yield tap
-                eng.release(step.keys)
+                yield from self._tap(step.keys)
                 yield gap
             elif kind == "press":
                 eng.press(step.keys)
@@ -213,9 +211,7 @@ class MacroTask:
                         continue
                     usage, shift = entry
                     keys = (0xE1, usage) if shift else (usage,)
-                    eng.press(keys)
-                    yield eng.tap_delay()
-                    eng.release(keys)
+                    yield from self._tap(keys)
                     yield eng.gap_delay()
             elif kind == "wait":
                 yield step.ms / 1000.0
@@ -237,9 +233,9 @@ class MacroTask:
             elif kind == "mouse_click":
                 for _ in range(step.count):
                     eng.button(step.button, True)
-                    yield tap
+                    yield eng.tap_delay()
                     eng.button(step.button, False)
-                    yield gap
+                    yield eng.gap_delay()
             elif kind == "macro":
                 if self.depth >= MAX_DEPTH:
                     raise MacroError(f"macro nesting deeper than {MAX_DEPTH} ({step.name})")
@@ -248,6 +244,30 @@ class MacroTask:
                 yield from sub.gen
             else:  # pragma: no cover
                 raise MacroError(f"unknown step kind {kind}")
+
+
+    def _tap(self, keys: tuple[int, ...]) -> Generator[float, None, None]:
+        """Press and release ``keys`` the way fingers do.
+
+        Modifiers go down in their own report a little before the key and
+        come up a little after it; a human never lands Shift and the letter
+        in the same 10 ms poll, and keystroke analysis knows that.
+        """
+        eng = self.engine
+        mods = tuple(k for k in keys if is_modifier(k))
+        plain = tuple(k for k in keys if not is_modifier(k))
+        if mods and plain:
+            eng.press(mods)
+            yield eng.lead_delay()
+            eng.press(plain)
+            yield eng.tap_delay()
+            eng.release(plain)
+            yield eng.lead_delay()
+            eng.release(mods)
+        else:
+            eng.press(keys)
+            yield eng.tap_delay()
+            eng.release(keys)
 
 
 class MacroEngine:
@@ -269,7 +289,11 @@ class MacroEngine:
         self.failed = 0
 
     def _jitter(self) -> float:
-        return self._random.uniform(0, self.jitter_ms) / 1000.0 if self.jitter_ms else 0.0
+        # Right-skewed (mode near 30 % of the range) rather than flat: human
+        # hold and gap times cluster near a minimum with a long tail.
+        if not self.jitter_ms:
+            return 0.0
+        return self._random.triangular(0, self.jitter_ms, self.jitter_ms * 0.3) / 1000.0
 
     def tap_delay(self) -> float:
         """Hold time for a tap; randomised by ``jitter_ms`` so scripted input
@@ -279,6 +303,10 @@ class MacroEngine:
 
     def gap_delay(self) -> float:
         return self.step_ms / 1000.0 + self._jitter()
+
+    def lead_delay(self) -> float:
+        """Modifier lead/lag around a key: half a tap plus jitter."""
+        return self.tap_ms / 2000.0 + self._jitter()
 
     # -- state used by the bridge when merging reports ------------------------
     def press(self, keys: Iterable[int]) -> None:

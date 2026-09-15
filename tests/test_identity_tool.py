@@ -150,6 +150,19 @@ class IdentityToolTests(unittest.TestCase):
         import tomllib
         tomllib.loads(out)   # warnings are comments; still valid TOML
 
+    def test_presented_follows_config(self):
+        from hid_bridge.config import parse_config
+        cfg = parse_config({"keyboard": {"descriptor": "extended"}, "mouse": {"mode": "absolute"},
+                            "gadget": {"max_speed": "high-speed"}})
+        presented = tool.presented_from_config(cfg)
+        self.assertEqual(presented["interfaces"][0]["report_len"], 65)
+        self.assertEqual(presented["interfaces"][0]["bInterval"], 1)
+        self.assertEqual((presented["interfaces"][1]["subclass"], presented["interfaces"][1]["protocol"]), (0, 0))
+        self.assertEqual(presented["interfaces"][1]["wMaxPacketSize"], 6)
+        out = tool.convert(SAMPLE_TOPOLOGY, presented=presented)
+        self.assertNotIn("interface 0: reference report descriptor is 65 bytes", out)   # now matches
+        self.assertNotIn("interface 1: reference class/subclass/protocol (3, 0, 0)", out)
+
     def test_no_interface_block_is_flagged(self):
         out = tool.convert(SAMPLE)
         self.assertIn("no interface descriptors found", out)

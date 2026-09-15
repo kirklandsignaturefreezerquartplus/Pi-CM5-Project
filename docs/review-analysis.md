@@ -250,6 +250,82 @@ could be added for the rel→abs mode if someone uses it.
   warnings (item 4); doc corrections (items 1 and 2).
 * This document.
 
+## Independent verification (added after the analysis above)
+
+The ten verdicts were handed to independent verifier agents with the
+repository and the kernel sources, and each verdict was then attacked by
+two adversarial reviewers (a USB-protocol lens and a Linux-gadget-stack
+lens).  Two completeness critics searched the whole project for anything
+both the review and the analysis had missed.
+
+**Verdicts.** All ten conclusions held.  Five were marked "materially
+incomplete" on specific points, all folded in:
+
+* Item 3: the only workable route to a USB 1.1 clone is lowering dwc2's
+  EP0 size and stashing the configfs `bcdUSB` at bind; honouring
+  `bMaxPacketSize0` from configfs (as `usb-identity.md` once suggested)
+  would advertise a size the controller does not use.
+* Item 4: `usb_f_hid` also attaches an interface string ("HID Interface")
+  to every interface, a Linux-only tell nobody had listed.  Fixed in
+  `kernel-patches/0001`.
+* Item 5: the partial-power-down branch of patch 0004 never asserted the
+  wakeup signal, the patch dereferenced the composite device before
+  checking the function was configured, and it could drive resume inside
+  the 5 ms minimum suspend time.  All three fixed in the reworked 0004.
+* Item 6: `GET_REPORT` for an undeclared report ID was answered after a
+  2.5 s stall with zeros, a timing signature.  Fixed in the reworked 0003.
+* Item 7: an RP2040 front-end would not give an 8-byte EP0 out of the box
+  (TinyUSB opens EP0 at 64) and the bridge's poll-paced output already
+  matches an MCU's; the remaining benefits stand.
+
+**Critics.** The robustness critic found one serious defect in the
+latest-state refactor of commit 815bc38: when the host suspends the bus,
+dwc2 refuses every queued request with EAGAIN while `poll()` still reports
+the fd writable, so the loop would have spun at 100 % CPU with any pending
+input until the host resumed.  The bridge now recognises "writable but
+refused" as suspension, backs off exponentially, consults libcomposite's
+`suspended` attribute before retrying, discards motion made while asleep,
+and re-sends the current state on resume.  Also fixed from the same
+report: a press-and-release inside one poll interval was coalesced away
+(transitions are now queued and replayed in order); motion accumulated
+during a long stall replayed as a multi-second cursor burst (it now
+saturates to one 8-bit report like a real mouse); the bridge kept stale
+`/dev/hidg*` descriptors after a gadget rebuild (they are revalidated every
+second); a restart within one poll of a key-down could leave the key
+auto-repeating (shutdown now waits briefly for the release to be
+collected, and only when something was held); evdev `SYN_DROPPED` was
+ignored (state is rebuilt from `EVIOCGKEY`); a control client that connected
+without sending could stall the loop for 0.5 s (now 50 ms); a device
+reusing an ignored `eventN` path inherited the old verdict (the inode is
+tracked); and the mouse re-sync after a host reset was a no-op.
+
+The protocol critic listed the residual request-level tells now closed by
+`kernel-patches/0005` (self-powered before configuration, remote-wakeup
+feature ACKed without the bit, test modes at full speed, `GET_STATUS` for a
+non-existent interface), the mouse interface accepting `SET_REPORT(Output)`
+(0003), LPM still enabled in the core after 0002 (0002 now turns it off),
+unsolicited zero reports at bridge start and stop (removed), macro
+modifiers landing in the same report as the key (they now lead and lag in
+their own reports), and the D+ pull-up being present without VBUS
+(`remaining-tells.md` §6).  Its remaining low items, `GET_IDLE` default 0
+versus the recommended 500 ms and the exact host-side polling period, are
+documented as deviations.
+
+One more bus-level finding came out of checking the jitter refutation:
+`f_hidg_write` queues every report with zero-length-packet termination, and
+because the endpoint size equals the report length, every report is
+followed by an empty packet on the next IN token.  No real HID device does
+that, an analyser sees it on every keystroke, and it halves the achievable
+report rate (one report per two polls).  Fixed in `kernel-patches/0001`.
+
+Corrections to the earlier text of this document: the invalid-string-index
+return is `composite.c:1367` (via `usbstring.c:55`), not 1316; the
+high-speed `bInterval` constants are `f_hid.c:222/234`, not 160/181;
+`raw_gadget` is itself a small kernel module that forwards every SETUP to
+user space, so "a custom kernel driver using raw-gadget" is a contradiction
+rather than merely imprecise; and "what most firmware does" and "no host
+software does this" are general knowledge, not verifiable from the sources.
+
 ## Offered follow-ups
 
 * Kernel patch 0005 (bcdUSB 1.10 and 8-byte EP0 at full speed) for cloning

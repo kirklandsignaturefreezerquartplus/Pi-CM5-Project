@@ -11,7 +11,9 @@ import errno
 import fcntl
 import logging
 import os
+import select
 import struct
+import time
 
 log = logging.getLogger("hid-bridge.hidg")
 
@@ -26,6 +28,9 @@ HIDG_MAX_REPORT_LENGTH = 64
 USB_HIDG_REPORT = struct.Struct("=BBH64s4s")
 GADGET_HID_WRITE_GET_REPORT = (1 << 30) | (USB_HIDG_REPORT.size << 16) | (ord("g") << 8) | 0x42
 
+BACKOFF_MIN = 0.05
+BACKOFF_MAX = 1.0
+
 
 class HidgDevice:
     def __init__(self, path: str, report_length: int, label: str, idle_report: bytes | None = None):
@@ -36,17 +41,29 @@ class HidgDevice:
         self.label = label
         self.idle_report = idle_report if idle_report is not None else bytes(report_length)
         self.fd = -1
+        self._rdev = 0
         self.last_report: bytes | None = None
+        self.last_sent_at = 0.0
         self.sent = 0
         self.dropped = 0
         self.deferred = 0
         self.disconnected = False
         # usb_f_hid marks the function "disabled" when the host de-configures
         # us; from then on its poll() reports readable forever and read()
-        # fails with ENOMEM, so the bridge must stop polling the fd for reads
-        # until the host configures us again.
+        # fails with ENOMEM (SET_REPORT path) or ESHUTDOWN (interrupt OUT
+        # path), so the bridge must stop polling the fd for reads until the
+        # host configures us again.
         self.host_disabled = False
+        # While the host has suspended the bus, dwc2 refuses every queued
+        # request (-EAGAIN) although poll() reports the fd writable.  The
+        # bridge detects that pattern and retries with a growing delay
+        # instead of spinning; ``suspended_path`` (libcomposite's sysfs
+        # attribute) lets it wait without even trying while suspended.
+        self.suspended_path = ""
+        self.backoff_until = 0.0
+        self._backoff = 0.0
         self._warned_disconnected = False
+        self._warned_backoff = False
         self._get_report_supported = True
         self._cached_get_report: bytes | None = None
 
@@ -54,6 +71,8 @@ class HidgDevice:
     def open(self) -> None:
         if self.fd < 0:
             self.fd = os.open(self.path, os.O_RDWR | os.O_NONBLOCK | os.O_CLOEXEC)
+            self._rdev = os.fstat(self.fd).st_rdev
+            self._cached_get_report = None
             self.cache_get_report(self.idle_report)
 
     def close(self) -> None:
@@ -62,6 +81,29 @@ class HidgDevice:
                 os.close(self.fd)
             finally:
                 self.fd = -1
+
+    def revalidate(self) -> bool:
+        """Reopen if /dev/hidgN was recreated (gadget torn down and rebuilt).
+
+        Returns True when the device node changed.
+        """
+        if self.fd < 0:
+            return False
+        try:
+            rdev = os.stat(self.path).st_rdev
+        except FileNotFoundError:
+            rdev = 0
+        if rdev == self._rdev:
+            return False
+        log.warning("%s: %s was recreated; reopening", self.label, self.path)
+        self.close()
+        self.last_report = None
+        self.disconnected = True
+        try:
+            self.open()
+        except OSError as exc:
+            log.warning("%s: cannot reopen %s: %s", self.label, self.path, exc.strerror)
+        return True
 
     @property
     def poll_readable(self) -> bool:
@@ -73,6 +115,34 @@ class HidgDevice:
         if self.host_disabled and udc_state == "configured":
             log.info("%s: host configured the interface again", self.label)
             self.host_disabled = False
+
+    def host_suspended(self) -> bool:
+        """libcomposite's view of bus suspend (poll-only sysfs attribute)."""
+        if not self.suspended_path:
+            return False
+        try:
+            with open(self.suspended_path) as fh:
+                return fh.read().strip() == "1"
+        except OSError:
+            return False
+
+    def enter_backoff(self, now: float) -> None:
+        """A write failed although the fd was writable: the bus is suspended."""
+        self._backoff = min(max(self._backoff * 2, BACKOFF_MIN), BACKOFF_MAX)
+        self.backoff_until = now + self._backoff
+        if not self._warned_backoff:
+            log.info("%s: host is not accepting reports (bus suspended?); retrying with backoff", self.label)
+            self._warned_backoff = True
+
+    def extend_backoff(self, now: float, seconds: float = 0.25) -> None:
+        self.backoff_until = now + seconds
+
+    def _clear_backoff(self) -> None:
+        if self._warned_backoff:
+            log.info("%s: host accepting reports again", self.label)
+        self._backoff = 0.0
+        self.backoff_until = 0.0
+        self._warned_backoff = False
 
     # -- GET_REPORT cache -------------------------------------------------------
     def cache_get_report(self, report: bytes) -> None:
@@ -99,11 +169,11 @@ class HidgDevice:
         identical to the last one and ``force`` is not set).  Returns False
         when it could not go out right now: either the previous report is
         still waiting for the host to poll (``usb_f_hid`` keeps exactly one
-        IN request in flight; the fd becomes writable once it completes) or
-        the host is not connected.  The caller keeps its own "latest state"
-        and retries when the fd is writable, which is how a real keyboard or
-        mouse behaves: one report register, latest state wins, motion
-        accumulates between polls.
+        IN request in flight; the fd becomes writable once it completes),
+        the bus is suspended, or the host is not connected.  The caller
+        keeps its own "latest state" and retries when the fd is writable,
+        which is how a real keyboard or mouse behaves: one report register,
+        latest state wins, motion accumulates between polls.
 
         ``get_report`` overrides what GET_REPORT should answer from now on;
         it defaults to ``report`` (correct for state-based reports).
@@ -123,7 +193,7 @@ class HidgDevice:
         try:
             os.write(self.fd, report)
         except BlockingIOError:
-            # Previous report not yet collected by the host: retry when writable.
+            # Previous report not yet collected by the host, or bus suspended.
             self.deferred += 1
             return False
         except OSError as exc:
@@ -133,13 +203,32 @@ class HidgDevice:
                 return False
             raise
         self.last_report = report
+        self.last_sent_at = time.monotonic()
         self.sent += 1
+        if self.backoff_until or self._backoff:
+            self._clear_backoff()
         if self.disconnected or self.host_disabled:
             log.info("%s: host connected again", self.label)
             self.disconnected = False
             self.host_disabled = False
             self._warned_disconnected = False
         return True
+
+    def write_report_blocking(self, report: bytes, timeout: float) -> bool:
+        """Best-effort delivery with a bounded wait; used only at shutdown."""
+        deadline = time.monotonic() + timeout
+        while True:
+            if self.write_report(report, force=True):
+                return True
+            if self.disconnected or self.host_disabled or self.fd < 0:
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            try:
+                select.select([], [self.fd], [], min(remaining, 0.02))
+            except OSError:
+                return False
 
     def _note_disconnect(self, exc: OSError) -> None:
         self.disconnected = True
@@ -176,5 +265,6 @@ class HidgDevice:
             "deferred": self.deferred,
             "dropped": self.dropped,
             "host_connected": not (self.disconnected or self.host_disabled),
+            "backing_off": self.backoff_until > 0,
             "get_report_cache": self._get_report_supported,
         }

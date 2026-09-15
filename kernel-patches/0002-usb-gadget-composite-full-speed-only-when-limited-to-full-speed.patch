@@ -1,19 +1,43 @@
 From: hid-bridge project
-Subject: [PATCH 2/2] usb: gadget: composite: behave as a full-speed-only device when limited to full speed
+Subject: [PATCH 2/5] usb: gadget: composite, dwc2: behave as a full-speed-only device when limited to full speed
 
 When the composite driver's max_speed is full speed (configfs max_speed =
-"full-speed") the host sees a device that never chirps.  Such a device must
-STALL DEVICE_QUALIFIER and OTHER_SPEED_CONFIGURATION requests (USB 2.0
-section 9.6.2), and USB 2.0 Link Power Management only exists for
-high-speed operation, so bcdUSB must stay 0x0200 and no BOS descriptor may
-be offered even when the controller hardware is LPM capable.  The
-controller's own max_speed stays high (dwc2 does not lower it), which is
-why the driver's limit has to be consulted here.
+"full-speed") the host sees a device that never chirps.  Present it as the
+plain full-speed device it appears to be: STALL DEVICE_QUALIFIER and
+OTHER_SPEED_CONFIGURATION (USB 2.0 section 9.6.2 for full-speed-only
+devices), keep bcdUSB at 0x0200 and offer no BOS descriptor even when the
+controller hardware is LPM capable, and have dwc2 leave LPM acceptance off
+in that case so the wire matches the descriptors.  The controller's own
+max_speed stays high (dwc2 does not lower it), which is why the driver's
+limit has to be consulted.  Ordinary keyboards do not advertise LPM.
 
 ---
+diff --git a/drivers/usb/dwc2/gadget.c b/drivers/usb/dwc2/gadget.c
+index 324630a..71b8dac 100644
+--- a/drivers/usb/dwc2/gadget.c
++++ b/drivers/usb/dwc2/gadget.c
+@@ -5293,6 +5293,16 @@ void dwc2_gadget_init_lpm(struct dwc2_hsotg *hsotg)
+ 	if (!hsotg->params.lpm)
+ 		return;
+ 
++	/*
++	 * A gadget driver limited to full speed presents a device whose
++	 * descriptors do not advertise LPM (see composite.c); do not let the
++	 * core accept LPM transactions either, so the wire matches them.
++	 */
++	if (hsotg->driver && hsotg->driver->max_speed < USB_SPEED_HIGH) {
++		dwc2_writel(hsotg, 0, GLPMCFG);
++		return;
++	}
++
+ 	val = GLPMCFG_LPMCAP | GLPMCFG_APPL1RES;
+ 	val |= hsotg->params.hird_threshold_en ? GLPMCFG_HIRD_THRES_EN : 0;
+ 	val |= hsotg->params.lpm_clock_gating ? GLPMCFG_ENBLSLPM : 0;
+diff --git a/drivers/usb/gadget/composite.c b/drivers/usb/gadget/composite.c
+index 81ff697..88e890f 100644
 --- a/drivers/usb/gadget/composite.c
 +++ b/drivers/usb/gadget/composite.c
-@@ -1839,7 +1839,14 @@
+@@ -1839,7 +1839,14 @@ composite_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ctrl)
  					cdev->desc.bcdUSB = cpu_to_le16(0x0210);
  				}
  			} else {
@@ -29,7 +53,7 @@ why the driver's limit has to be consulted here.
  					cdev->desc.bcdUSB = cpu_to_le16(0x0201);
  				else
  					cdev->desc.bcdUSB = cpu_to_le16(0x0200);
-@@ -1849,7 +1856,13 @@
+@@ -1849,7 +1856,13 @@ composite_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ctrl)
  			memcpy(req->buf, &cdev->desc, value);
  			break;
  		case USB_DT_DEVICE_QUALIFIER:
@@ -43,7 +67,7 @@ why the driver's limit has to be consulted here.
  			    gadget->speed >= USB_SPEED_SUPER)
  				break;
  			device_qual(cdev);
-@@ -1858,6 +1871,7 @@
+@@ -1858,6 +1871,7 @@ composite_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ctrl)
  			break;
  		case USB_DT_OTHER_SPEED_CONFIG:
  			if (!gadget_is_dualspeed(gadget) ||
@@ -51,7 +75,7 @@ why the driver's limit has to be consulted here.
  			    gadget->speed >= USB_SPEED_SUPER)
  				break;
  			fallthrough;
-@@ -1874,7 +1888,9 @@
+@@ -1874,7 +1888,9 @@ composite_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ctrl)
  			break;
  		case USB_DT_BOS:
  			if (gadget_is_superspeed(gadget) ||

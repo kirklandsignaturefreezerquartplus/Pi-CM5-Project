@@ -662,9 +662,11 @@ sudo cp arch/arm64/boot/dts/overlays/*.dtb* /boot/firmware/overlays/
 sudo reboot
 ```
 
-Afterwards `hid-bridge check` no longer lists `strict_report_types` or
-`wakeup_on_write` as missing, and `tools/verify-gadget.sh` shows them set to
-1.  Hold the kernel package so an update does not replace it:
+Afterwards `hid-bridge check` reports `kernel-patches/ present: yes`, no
+longer lists `strict_report_types` or `wakeup_on_write` as missing, and
+`tools/verify-gadget.sh` shows them set to 1.  The remote-wakeup operation
+can be exercised without a key press: `echo 1 | sudo tee
+/sys/class/udc/*/srp` while the target sleeps.  Hold the kernel package so an update does not replace it:
 
 ```sh
 apt-mark showhold; dpkg -l | grep linux-image    # find the installed package name
@@ -689,12 +691,11 @@ From `docs/remaining-tells.md`, in priority order:
    on the target being on.  A CM5 that boots before the target's USB
    controller powers up is simply "a keyboard that was there".
 2. **Never restart `hid-gadget` or reboot the CM5 while the target is in
-   use**; it looks like a keyboard being unplugged.  Restarting `hid-bridge`
-   alone is invisible.  Turn off unattended reboots:
+   use**; it looks like a keyboard being unplugged.  Restarting `hid-bridge` alone sends nothing on the bus (it only releases keys that were still held).  Turn off unattended reboots:
    `sudo systemctl disable --now unattended-upgrades` or configure it never to
    reboot.
 3. **Boot order**: `sudo rpi-eeprom-config --edit`, set `BOOT_ORDER=0xf1`
-   (eMMC only, retry forever) so a failed boot never falls into USB
+   (eMMC/SD, then retry forever) so a failed boot never falls into USB
    programming mode.  Save, exit, reboot.
 4. **VBUS load**: a 150 to 220 Ω, 0.5 W resistor between 5 V and ground on the
    target side of the power blocker makes the "keyboard" draw a realistic 25

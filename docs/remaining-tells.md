@@ -21,9 +21,14 @@ tools/identity-from-lsusb.py dump.txt        # prints a ready [gadget] block
 
 and paste the block into `/etc/hid-bridge/config.toml`.  This copies
 idVendor, idProduct, bcdDevice, the three strings and the power attributes,
-so the CM5 is indistinguishable from that unit by ID lookup.  Keep a
-*different* serial from the physical unit so Windows never sees two
-instances with the same serial if both are ever attached.
+so the CM5 is indistinguishable from that unit by ID lookup.  It also
+prints a `# WARNING` for every point where the reference's descriptor tree
+(bcdUSB, EP0 size, interface count, class triples, endpoints, polling
+interval, packet size, bcdHID, report-descriptor length) differs from what
+hid-bridge will present; pass `--config /etc/hid-bridge/config.toml` so the
+comparison uses your actual settings.  Keep a *different* serial from the
+physical unit so Windows never sees two instances with the same serial if
+both are ever attached.
 
 **Trade-offs:**
 * The VID belongs to that vendor.  Using it on your own private hardware has
@@ -64,10 +69,14 @@ metal-film part inside the adapter shell or a small breakout board.  Do
 keyboard drops to ≤ 2.5 mA when the host suspends the bus.  A meter watching
 suspend current would still notice.  Solving that needs a switched load
 driven by a CM5 GPIO from the gadget's suspend state, which libcomposite
-exports as `/sys/class/udc/<udc>/device/gadget.0/suspended` (the `gadget.N`
-device under the controller; also reachable as
-`/sys/bus/gadget/devices/gadget.0/suspended`); reasonable follow-up if
-suspend behaviour matters to you.
+exports as `/sys/class/udc/<udc>/gadget/suspended` (a symlink to the
+`gadget.N` device under the controller, also reachable as
+`/sys/bus/gadget/devices/gadget.N/suspended`).  Two caveats for whoever
+builds it: the attribute is poll-only (no `sysfs_notify`), and USB 2.0
+§7.1.7.6 gives a device 10 ms to reach suspend current, so it needs its own
+fast poll rather than the bridge's 1 s rescan; and the file exists only
+while the gadget is bound.  The bridge itself reads the same attribute to
+tell a suspended bus from a busy one.
 
 Alternative: declare `self_powered = true` and `max_power_ma = 2`.  Honest
 and consistent with the meter, but self-powered keyboards are rare, so it is
@@ -89,10 +98,15 @@ Keyboard Device → Power Management, press a key on the PiKVM, confirm the PC
 resumes and `journalctl -k | grep -i "remote wakeup"` shows the dwc2 debug
 line (enable dynamic debug for `dwc2` to see it).
 
+The wakeup operation can also be exercised without a key press: `echo 1 |
+sudo tee /sys/class/udc/*/srp` calls it directly.
+
 **If you would rather not run a patched kernel:** set `remote_wakeup =
-false`.  The descriptor then says 0x80 (no wakeup), Windows offers no wake
-option, and behaviour matches the descriptor.  Keyboards without remote
-wakeup exist but are the minority.
+false`.  The descriptor then says 0x80 (no wakeup) and Windows offers no
+wake option.  Note that a stock dwc2 still ACKs `SET_FEATURE(REMOTE_WAKEUP)`
+if a host sends it anyway; `kernel-patches/0005` makes it STALL as a real
+device without the bit would.  Keyboards without remote wakeup exist but
+are the minority.
 
 ## 4. Keyboard appears 15–25 s after power and reconnects when the CM5 restarts
 
@@ -136,17 +150,35 @@ port, if the CM5 ever enters USB device boot (rpiboot) mode.
    and take an image backup so a corrupted root filesystem is restored
    rather than debugged with the PC attached.
 
-## 6. Fixed values shared with many real devices (no action)
+## 6. D+ pull-up without VBUS, and instant attach
+
+**Seen by:** a meter on D+ while the PC's port is unpowered, or an analyser
+timing the interval between VBUS appearing and the device attaching.  With
+the recommended VBUS-blocking adapter the CM5 never sees the PC's 5 V, so
+dwc2 keeps the D+ pull-up asserted whenever the gadget is bound; a real
+bus-powered keyboard cannot pull up D+ before VBUS and attaches only after
+its controller has started, tens of milliseconds later.
+
+**Recommended:** sense the PC's VBUS on a CM5 GPIO (a two-resistor divider
+from the PC side of the blocker to a 3.3 V input) and have a small service
+write `disconnect` / `connect` to `/sys/class/udc/<udc>/soft_connect` when
+VBUS drops / appears, with a short randomised delay (20–80 ms) after it
+appears.  The `soft_connect` attribute is in the stock kernel; only the GPIO
+wiring and a few lines of script are new.  Low priority: it needs physical
+access to the port while the PC is off.
+
+## 7. Fixed values shared with many real devices (no action)
 
 `bMaxPacketSize0 = 64`, `bInterval = 10 ms` at full speed, string language
-0x0409 only, and sorted key order in the keyboard array are all found in
-genuine products and do not point to a Raspberry Pi.  They are listed here
-only for completeness.
+0x0409 only, `GET_IDLE` returning 0 before the host sets an idle rate, and
+sorted key order in the keyboard array are all found in genuine products and
+do not point to a Raspberry Pi.  They are listed here only for completeness.
 
 ## Priority order
 
 1. Patched kernel (`kernel-patches/`, ~1 h build) — closes every
-   protocol-level tell, including remote wakeup once patch 0004 is verified.
+   protocol-level tell identified so far, including remote wakeup and the
+   standard-request answers, once patches 0004 and 0005 are verified.
 2. Independent always-on power for the CM5 — removes the boot-timing tell
    and stabilises everything else.
 3. VBUS load resistor in the isolating adapter — cheap, closes the current
