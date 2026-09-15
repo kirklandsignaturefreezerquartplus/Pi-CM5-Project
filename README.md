@@ -157,6 +157,8 @@ systemd/             hid-gadget.service (oneshot) and hid-bridge.service
 tools/               verify-gadget.sh (CM5), windows/Get-HidBridgeDevices.ps1 (target)
 kernel-patches/      optional rpi-6.12.y patches removing kernel-side gadget tells
 tools/identity-from-lsusb.py  turn an lsusb -v dump of a reference keyboard into [gadget] settings
+tools/make-review-bundle.py   write/verify REVIEW_BUNDLE.md
+REVIEW_BUNDLE.md     all of the above in one file for code review and portability; not for use
 docs/                GUIDE (start here), hardware, usb-identity, remaining-tells, review-analysis, pikvm, macros, troubleshooting
 tests/               unit tests (python3 -m unittest discover -s tests)
 ```
@@ -166,6 +168,7 @@ tests/               unit tests (python3 -m unittest discover -s tests)
 ```sh
 make test                      # unit tests, no hardware needed
 make check                     # validate config/config.toml and dump descriptors
+make bundle                    # regenerate REVIEW_BUNDLE.md (every tracked file in one document, for review only)
 HID_BRIDGE_CONFIG=config/config.toml python3 -m hid_bridge inputs
 ```
 
