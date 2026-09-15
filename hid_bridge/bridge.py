@@ -19,6 +19,7 @@ from .linux_input import InputDevice, list_event_nodes
 from .macros import MacroEngine, MacroError, Step, parse_step
 from .reports import (
     BUTTON_BITS,
+    KEYBOARD_IDLE_REPORT,
     LED_BIT_TO_EVDEV,
     absolute_mouse_report,
     clamp,
@@ -143,6 +144,12 @@ class Bridge:
     def _flush_keyboard(self) -> None:
         report = keyboard_report(self.all_usages(), self.max_usage)
         tail = self._kbd_queue[-1] if self._kbd_queue else self.kbd.last_report
+        if tail is None and report == KEYBOARD_IDLE_REPORT:
+            # Host state unknown (start-up or re-enumeration) but nothing is
+            # held: a real keyboard sends nothing until its state changes,
+            # and the host assumes all keys up after enumeration.
+            self.kbd.last_report = KEYBOARD_IDLE_REPORT
+            return
         if report != tail:
             self._kbd_queue.append(report)
         self._pump_keyboard()
@@ -226,6 +233,13 @@ class Bridge:
                 return
             if self.mouse.last_report is None:
                 self._mouse_last_buttons = None          # host re-enumerated: its state is unknown
+            if (self._mouse_last_buttons is None and not self._btn_queue and not self._motion_pending()
+                    and self.all_buttons() == 0):
+                # Nothing held and nothing to move: the host assumes all
+                # buttons up after enumeration; say nothing, as a mouse does.
+                self._mouse_last_buttons = 0
+                self._mouse_dirty = False
+                return
             if self._motion_blocked_since is not None and now - self._motion_blocked_since > self.STALL_GAP:
                 self._saturate_motion()
             if self._btn_queue:

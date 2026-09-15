@@ -514,6 +514,18 @@ class SuspendAndRobustnessTests(unittest.TestCase):
         self.assertEqual(bridge.kbd.blocking_writes, [])
         self.assertEqual(bridge.mouse.blocking_writes, [])
 
+    def test_nothing_sent_at_start_or_reenumeration_when_idle(self):
+        bridge = make_bridge()
+        bridge.kbd.last_report = None          # as at start-up
+        attach(bridge, FakeDevice("K", keyboard=True, mouse=True))
+        bridge._flush_keyboard()
+        bridge._mouse_dirty = True
+        bridge._pump_mouse()
+        self.assertEqual(bridge.kbd.reports, [])
+        self.assertEqual(bridge.mouse.reports, [])
+        self.assertEqual(bridge.kbd.last_report, bytes(8))   # host assumed idle
+        self.assertEqual(bridge._mouse_last_buttons, 0)
+
     def test_mouse_resync_after_reenumeration(self):
         bridge = make_bridge()
         src = attach(bridge, FakeDevice("M", keyboard=False, mouse=True))

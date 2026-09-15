@@ -99,7 +99,9 @@ resumes and `journalctl -k | grep -i "remote wakeup"` shows the dwc2 debug
 line (enable dynamic debug for `dwc2` to see it).
 
 The wakeup operation can also be exercised without a key press: `echo 1 |
-sudo tee /sys/class/udc/*/srp` calls it directly.
+sudo tee /sys/class/udc/*/srp` calls it directly.  It only signals when the
+PC has the bus suspended and had enabled remote wakeup; otherwise it returns
+`-EINVAL` silently (visible with dynamic debug for `dwc2`).
 
 **If you would rather not run a patched kernel:** set `remote_wakeup =
 false`.  The descriptor then says 0x80 (no wakeup) and Windows offers no
@@ -122,7 +124,8 @@ arrival sound / Event Log during a session.
    with a real one.  This removes the tell entirely for normal use.
 2. Do not restart `hid-gadget.service` or reboot the CM5 while the PC is in
    use.  Restarting `hid-bridge.service` alone is safe: the gadget stays
-   bound and the PC sees nothing.  Disable unattended reboots on the CM5
+   bound, nothing is sent at start, and at stop only keys or buttons that
+   were held are released.  Disable unattended reboots on the CM5
    (`unattended-upgrades` with automatic reboot, `needrestart`).
 3. Optional, for cases where the CM5 must boot together with the PC: trim
    boot time.  Raspberry Pi OS Lite reaches `multi-user.target` in roughly
@@ -170,7 +173,8 @@ access to the port while the PC is off.
 ## 7. Fixed values shared with many real devices (no action)
 
 `bMaxPacketSize0 = 64`, `bInterval = 10 ms` at full speed, string language
-0x0409 only, `GET_IDLE` returning 0 before the host sets an idle rate, and
+0x0409 only, `GET_IDLE` returning 0 (with `kernel-patches/0001`) before the
+host sets an idle rate, and
 sorted key order in the keyboard array are all found in genuine products and
 do not point to a Raspberry Pi.  They are listed here only for completeness.
 

@@ -16,14 +16,17 @@ Windows or UEFI, which do not look at them).  The five patches remove them.
 | `GET_REPORT` for Output/Feature or an undeclared report ID, `SET_REPORT` for Input/Feature or to an interface without an Output report | answered / accepted (an undeclared report ID even waits 2.5 s) | STALLed via the `strict_report_types` attribute (0003), which `hid-bridge gadget up` enables |
 | Remote wakeup | bit advertised, key press never wakes a suspended host (dwc2 has no `.wakeup`) | dwc2 `.wakeup` operation plus an f_hid `wakeup_on_write` attribute that `hid-bridge gadget up` enables (0004) |
 | `GET_STATUS(Device)` before `SET_CONFIGURATION` | reports Self Powered | reports bus-powered, then follows the configuration (0005) |
-| `SET_FEATURE(DEVICE_REMOTE_WAKEUP)` when the configuration has no wakeup bit | ACKed and reflected in `GET_STATUS` | STALLed; flags cleared on bus reset (0005) |
+| `SET_FEATURE(DEVICE_REMOTE_WAKEUP)` when the configuration has no wakeup bit | ACKed and reflected in `GET_STATUS`, and left enabled across a bus reset | STALLed; both flags cleared on bus reset as USB 2.0 §9.1.1.6 requires (0005) |
 | `SET_FEATURE(TEST_MODE)` at full speed | entered | STALLed: test modes are for high-speed capable functions (0005) |
 | `GET_STATUS(Interface)` | zero for any wIndex, configured or not | zero for an existing interface of the active configuration, STALL otherwise (0005) |
 
 The patches are generated from and verified against the `rpi-6.12.y` branch of
 https://github.com/raspberrypi/linux.  They are small, affect only gadget
-mode, and change nothing when `max_speed` is `high-speed` except 0001, 0003
-and 0005's request handling.  **0004 and 0005 have not been exercised on
+mode.  Only 0002 (and the test-mode check in 0005) is specific to full
+speed; 0001, 0003, 0004 and the rest of 0005 apply at any speed.  They form
+one series and must be applied in order: 0005 relies on 0004's
+`wakeup_capable`, otherwise libcomposite strips the remote-wakeup bit from
+the configuration descriptor.  **0004 and 0005 have not been exercised on
 CM5 hardware yet**; `docs/remaining-tells.md` §3 has the remote-wakeup test
 procedure.
 
@@ -61,8 +64,8 @@ official Raspberry Pi kernel documentation with the same `git apply` step.
   controller; many real full-speed keyboards report the same.  A USB 1.1
   clone (bcdUSB 1.10, EP0 8) would need dwc2 to use an 8-byte EP0 at full
   speed and libcomposite to honour the configfs bcdUSB; feasible (the
-  low-speed path already uses 8) but not written, see
-  `docs/review-analysis.md` item 3.
+  low-speed path already uses 8) but not written; `docs/review-analysis.md`
+  item 3 sketches it as a possible 0006.
 * `bInterval` fixed at 10 ms (full speed): typical for keyboards and cheap
   mice; adding a configfs attribute is a larger change than is warranted.
 * `GET_IDLE` power-up default: HID 1.11 recommends 500 ms for keyboards,

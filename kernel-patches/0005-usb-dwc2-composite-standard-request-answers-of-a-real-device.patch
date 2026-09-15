@@ -15,7 +15,8 @@ keyboard does and are visible to a host or analyser issuing the requests:
   reflected it even when the configuration did not advertise remote wakeup.
   Add the .set_remote_wakeup operation (called by libcomposite's set_config
   with the configuration's wakeup bit), STALL the feature request when the
-  configuration does not support it, and clear both flags on bus reset.
+  configuration does not support it, and clear both flags on bus reset
+  (dwc2_hsotg_core_init_disconnected), as USB 2.0 section 9.1.1.6 requires.
 - dwc2 entered USB 2.0 test modes at full speed; they exist for high-speed
   capable functions only, so STALL them when the gadget driver is limited
   to full speed.
@@ -38,7 +39,7 @@ index 2bd74f3..9c3d991 100644
  	struct dwc2_hsotg_ep *eps_out[MAX_EPS_CHANNELS];
  #endif /* CONFIG_USB_DWC2_PERIPHERAL || CONFIG_USB_DWC2_DUAL_ROLE */
 diff --git a/drivers/usb/dwc2/gadget.c b/drivers/usb/dwc2/gadget.c
-index e650c7b..3b8bcf3 100644
+index e650c7b..b43d424 100644
 --- a/drivers/usb/dwc2/gadget.c
 +++ b/drivers/usb/dwc2/gadget.c
 @@ -1693,9 +1693,12 @@ static int dwc2_hsotg_process_req_status(struct dwc2_hsotg *hsotg,
@@ -78,7 +79,20 @@ index e650c7b..3b8bcf3 100644
  
  			hsotg->test_mode = wIndex >> 8;
  			break;
-@@ -4891,6 +4901,25 @@ out:
+@@ -3321,6 +3331,12 @@ void dwc2_hsotg_disconnect(struct dwc2_hsotg *hsotg)
+ 
+ 	hsotg->connected = 0;
+ 	hsotg->test_mode = 0;
++	/* A bus reset returns the device to the default state: the host's
++	 * remote-wakeup enable is gone (USB 2.0 9.1.1.6), and so is the
++	 * configuration that supported it.
++	 */
++	hsotg->remote_wakeup_allowed = 0;
++	hsotg->remote_wakeup_supported = 0;
+ 
+ 	/* all endpoints should be shutdown */
+ 	for (ep = 0; ep < hsotg->num_of_eps; ep++) {
+@@ -4891,6 +4907,25 @@ out:
  	return ret;
  }
  
@@ -104,7 +118,7 @@ index e650c7b..3b8bcf3 100644
  static const struct usb_gadget_ops dwc2_hsotg_gadget_ops = {
  	.get_frame	= dwc2_hsotg_gadget_getframe,
  	.set_selfpowered	= dwc2_hsotg_set_selfpowered,
-@@ -4898,6 +4927,7 @@ static const struct usb_gadget_ops dwc2_hsotg_gadget_ops = {
+@@ -4898,6 +4933,7 @@ static const struct usb_gadget_ops dwc2_hsotg_gadget_ops = {
  	.udc_stop		= dwc2_hsotg_udc_stop,
  	.pullup                 = dwc2_hsotg_pullup,
  	.wakeup			= dwc2_hsotg_gadget_wakeup,
@@ -112,7 +126,7 @@ index e650c7b..3b8bcf3 100644
  	.udc_set_speed		= dwc2_gadget_set_speed,
  	.vbus_session		= dwc2_hsotg_vbus_session,
  	.vbus_draw		= dwc2_hsotg_vbus_draw,
-@@ -5119,6 +5149,7 @@ int dwc2_gadget_init(struct dwc2_hsotg *hsotg)
+@@ -5119,6 +5155,7 @@ int dwc2_gadget_init(struct dwc2_hsotg *hsotg)
  	hsotg->gadget.name = dev_name(dev);
  	hsotg->gadget.otg_caps = &hsotg->params.otg_caps;
  	hsotg->remote_wakeup_allowed = 0;

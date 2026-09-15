@@ -13,7 +13,7 @@ checked against the Raspberry Pi `rpi-6.12.y` kernel sources.
 | bDeviceClass / SubClass / Protocol | 0 / 0 / 0 | class defined at interface level, as every keyboard does |
 | idVendor / idProduct / bcdDevice | configurable | Windows and UEFI bind boot HID by class; the IDs only appear in Device Manager hardware IDs |
 | Strings | manufacturer, product, serial | all three set (install writes a random serial) or none; see "Strings" |
-| iConfiguration / iInterface | 0 | never set |
+| iConfiguration | 0 | never set |
 | bNumConfigurations | 1 | |
 | Configuration bmAttributes / MaxPower | 0xA0 (bus powered + remote wakeup), 100 mA | configurable |
 | OTG descriptor | absent | requires `dr_mode=peripheral`, which `install.sh` sets |
@@ -40,12 +40,13 @@ checked against the Raspberry Pi `rpi-6.12.y` kernel sources.
 |---|---|---|---|
 | bcdUSB | 0x0110 or 0x0200 | 0x0200; 0x0201 plus a BOS descriptor with a USB 2.0 Extension (LPM) capability if the dwc2 core has LPM enabled | `composite.c` recomputes it from the gadget's capabilities; `dwc2` sets `lpm_capable` from the hardware's `lpm_mode`; `kernel-patches/0002` keeps 0x0200 without BOS at full speed |
 | bMaxPacketSize0 | 8 or 64 | 64 | `composite.c` copies dwc2's EP0 size (`EP0_MPS_LIMIT`) |
-| bcdHID | 0x0110 | 0x0101 | constant in `usb_f_hid` |
+| bcdHID | 0x0110 | 0x0101 | constant in `usb_f_hid`; `kernel-patches/0001` |
 | bInterval | 8–10 ms (FS) | 10 ms at full speed, 1 ms at high speed | constants in `usb_f_hid`; the `poll_interval_ms` options only take effect on kernels that add an `interval` attribute |
-| DEVICE_QUALIFIER / OTHER_SPEED_CONFIGURATION at full speed | STALL (FS-only device) | answered (qualifier says high-speed capable) | `gadget->max_speed` stays HIGH because dwc2 does not read a DT `maximum-speed`; only `params.speed` is lowered; STALLed with `kernel-patches/0002` |
+| DEVICE_QUALIFIER / OTHER_SPEED_CONFIGURATION at full speed | STALL (FS-only device) | answered (qualifier says high-speed capable) | dwc2 derives `gadget.max_speed` from `params.speed` only at probe; the configfs `max_speed` reaches `dwc2_gadget_set_speed`, which lowers `params.speed` but not `gadget.max_speed`; STALLed with `kernel-patches/0002`, which consults the composite driver's limit |
 | Remote wakeup | bit advertised and functional | bit advertised, **not functional** on a stock kernel | dwc2's gadget ops have no `.wakeup` and `usb_f_hid` has no `wakeup_on_write` in 6.12; `kernel-patches/0004` adds both |
 | iInterface | 0 | string index pointing at "HID Interface" | constant in `usb_f_hid`; `kernel-patches/0001` |
-| `GET_STATUS(Device)` in the Address state | bus-powered | self-powered | `composite_bind` sets it at bind; `kernel-patches/0005` |
+| `GET_STATUS(Device)` in the Address state | bus-powered | self-powered | `composite_dev_prepare` sets it at bind; `kernel-patches/0005` |
+| Remote-wakeup enable after a bus reset | cleared (USB 2.0 9.1.1.6) | still set if the host had enabled it | dwc2 never clears it on reset; `kernel-patches/0005` |
 | `SET_FEATURE(REMOTE_WAKEUP)` with `remote_wakeup = false` | Request Error | ACKed | dwc2 has no `.set_remote_wakeup`; `kernel-patches/0005` |
 | `SET_FEATURE(TEST_MODE)` at full speed | Request Error | entered | dwc2; `kernel-patches/0005` |
 | `GET_STATUS(Interface 9)` | Request Error | 0x0000 | dwc2 answers without checking; `kernel-patches/0005` |
@@ -54,20 +55,23 @@ checked against the Raspberry Pi `rpi-6.12.y` kernel sources.
 | Unset strings | absent (index 0) | index allocated, empty string descriptor | `libcomposite` substitutes "" for unset strings once the language directory exists |
 
 Windows' HID class drivers and UEFI boot-keyboard drivers inspect none of
-these; all of them are common in genuine USB 2.0 full-speed keyboards sold
-today except the qualifier answer, which every host tolerates (a high-speed
-capable device attached at full speed is a legal state).  They are visible
-only to a descriptor dumper or a protocol analyser.
+these.  `bMaxPacketSize0 = 64`, `bInterval = 10 ms` and `bcdUSB 2.00` are
+common in genuine keyboards; the remaining rows are Linux-gadget tells,
+visible only to a descriptor dumper or a protocol analyser, which the
+patches remove.  The qualifier answer on a stock kernel is tolerated by
+every host (a high-speed capable device attached at full speed is a legal
+state).
 
 `hid-bridge check` and `tools/verify-gadget.sh` read dwc2's debugfs
 `params` to tell you whether LPM is on, i.e. whether the wire shows 2.00 or
 2.01 + BOS.
 
-If a byte-exact match is required anyway, the routes are a kernel patch
-(honour the configfs `bcdUSB`/`bMaxPacketSize0` in `composite_setup`, set
-`gadget.max_speed` from `params.speed` in `dwc2_gadget_init`, clear
-`lpm_capable`) or `raw-gadget`, where user space answers every control
-request itself.  Both are outside this project.
+If a byte-exact USB 1.1 match (`bcdUSB 1.10`, `bMaxPacketSize0 8`) is
+required as well, the routes are a further kernel patch (an 8-byte EP0 in
+dwc2 at full speed, and `composite_setup` honouring the configfs `bcdUSB`
+when the driver is limited to full speed; see "What the patches do not
+touch" in `kernel-patches/README.md`) or `raw-gadget`, where user space
+answers every control request itself.  Neither is written.
 
 ## Deep inspection: what could still give the CM5 away
 
@@ -79,14 +83,14 @@ residual tells are indirect:
 |---|---|---|
 | `bcdHID 1.01`, `GET_IDLE = 1`, qualifier answered at full speed, `bcdUSB 2.01` + BOS when LPM is on: together they fingerprint "Linux `usb_f_hid` on a dwc2 controller", i.e. a Raspberry Pi class board | analyser / dumper | **fixed by `kernel-patches/`** (kernel rebuild required) |
 | VID:PID `1209:0001` resolves to "pid.codes Test PID" in `usb.ids` | `lsusb`, USBView, any ID lookup | **your decision**: set `gadget.vendor_id/product_id`; `hid-bridge check` reminds you while the test ID is in use |
-| `GET_REPORT`/`SET_REPORT` for the *Feature* report type are accepted (real boot keyboards STALL them); `SET_REPORT` of any type lands in the LED path | analyser sending malformed class requests | **fixed by `kernel-patches/0003`** (`strict_report_types`, enabled automatically by `hid-bridge gadget up` when present); on a stock kernel the bridge additionally ignores any non-1-byte report in the LED path |
+| `GET_REPORT` for Output/Feature reports or undeclared report IDs and `SET_REPORT` for Input/Feature reports (or Output to the mouse) are accepted (real devices STALL them); `SET_REPORT` of any type lands in the LED path | analyser sending malformed class requests | **fixed by `kernel-patches/0003`** (`strict_report_types`, enabled automatically by `hid-bridge gadget up` when present); on a stock kernel the bridge additionally ignores any non-1-byte report in the LED path |
 | Remote wakeup advertised but a key press does not wake a suspended PC | functional test | **`kernel-patches/0004`** (dwc2 `.wakeup` + f_hid `wakeup_on_write`; applies cleanly, untested on hardware); otherwise set `remote_wakeup = false` |
 | VBUS current ≈ 0 mA while declaring bus-powered 100 mA | USB power meter | hardware: the CM5 runs from its own supply |
 | The keyboard appears 15–25 s after the CM5 gets power and disconnects/reconnects whenever the CM5 or `hid-gadget.service` restarts | anyone watching enumeration | operational: power the CM5 before the PC, do not reboot it mid-session |
 | With the nRPIBOOT strap fitted (or boot media missing on some carriers) the BCM2712 boot ROM enumerates as a Broadcom boot device (`0a5c:2712`) on the same port | anyone | hardware: keep nRPIBOOT unfitted and boot media reliable |
 | Macro `type` steps with a fixed cadence, or modifier and key landing in the same report, look machine-generated | timing / report-sequence analysis of typed text | modifiers now lead and follow the key in their own reports; `bridge.macro_jitter_ms` (default 30) adds right-skewed jitter |
 | D+ pull-up present while the PC port is unpowered, and attach with zero delay after port power-on (with the VBUS-blocking adapter the CM5 never sees the PC's 5 V) | meter on D+ with the port off; analyser timing VBUS-on to attach | hardware/operational: sense the PC's VBUS on a CM5 GPIO and drive `/sys/class/udc/<udc>/soft_connect`; see `docs/remaining-tells.md` §6 |
-| A `GET_REPORT` arriving while `hid-bridge.service` is stopped is answered after 2.5 s with zeros | analyser, only in that window | `hid-bridge gadget up` now primes the GET_REPORT cache itself |
+| A `GET_REPORT` arriving while `hid-bridge.service` is stopped is answered after 2.5 s with zeros | analyser, only in that window | `hid-bridge gadget up` primes the GET_REPORT cache when it creates the gadget |
 
 Recommended solves for every row that is not purely software are in
 `docs/remaining-tells.md`.
@@ -98,8 +102,9 @@ real two-interface keyboard/mouse device.
 ## Speed choice
 
 * **full-speed** (default): 12 Mbit/s like real keyboards and mice, 10 ms
-  polling, boot-protocol behaviour identical to a real FS device.  Deviation:
-  the qualifier answer above.
+  polling, boot-protocol behaviour identical to a real FS device.  Deviation
+  on a stock kernel: the qualifier answer above (removed by
+  `kernel-patches/0002`).
 * **high-speed**: a fully self-consistent USB 2.0 high-speed device with 1 ms
   polling (what gaming keyboards do).  Deviation: generic keyboards are not
   high-speed.  UEFI handles high-speed HID on any EHCI/xHCI controller.
